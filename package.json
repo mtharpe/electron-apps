@@ -1,0 +1,13 @@
+{
+  "name": "google-standalone-app",
+  "productName": "GoogleApp",
+  "version": "1.0.0",
+  "main": "main.js",
+  "author": "Mike Tharpe",
+  "description": "Standalone Google web app with per-window account isolation",
+  "license": "MIT",
+  "devDependencies": {
+    "@electron/packager": "^20.0.1",
+    "electron": "^42.4.0"
+  }
+}
