@@ -1,8 +1,8 @@
 # Google Standalone Apps for macOS
 
-Turn **Gmail, Google Calendar, Google Tasks, Google Keep, and Google Messages** into real,
-standalone macOS apps — each with its own icon, its own Dock/⌘-Tab identity, dark window
-chrome, and **native macOS notifications** — fully independent of Chrome.
+Turn **Gmail, Google Calendar, Google Tasks, and Google Keep** into real, standalone macOS
+apps — each with its own icon, its own Dock/⌘-Tab identity, dark window chrome, and
+**native macOS notifications** — fully independent of Chrome.
 
 Unlike Chrome PWAs, these are genuine separate applications. Unlike plain
 [Nativefier](https://github.com/nativefier/nativefier), they actually get **past Google's
@@ -77,14 +77,6 @@ right-click → **Options → Keep in Dock**.
   another app. Test via **Help → Send Test Notification in 5s** (then click away).
 - For reminders that **persist** on screen, set
   **System Settings → Notifications → \<app\> → Alert style → Alerts**.
-
-### Google Messages
-Messages runs **without** the sign-in stealth (it renders blank with `contextIsolation:false`),
-so pair it by **QR code**, not the Google-account "Sign In" button (that path is blocked in
-a non-stealth window). On first launch, click **"Pair with QR code"**, then on your phone open
-**Messages → Device pairing → Scan QR code**, and enable **"Remember this computer."** The
-persistent session keeps it paired across restarts, and the app must stay running (background
-throttling is disabled, so it stays connected) to receive messages and fire notifications.
 
 ### Keyboard shortcuts
 | Shortcut | Action |
@@ -173,8 +165,11 @@ Then rebuild.
 
 - Apple Silicon (arm64) only as configured; add `--arch=x64` in `build.sh` for Intel.
 - Google Tasks has no standalone page; it uses the embedded Tasks view.
-- Google Messages is **QR-pairing only** — its renderer needs `contextIsolation:true`, which
-  is incompatible with the sign-in stealth, so the Google-account "Sign In" path is blocked.
+- **Google Messages is not included.** It now requires Google sign-in (QR pairing removed),
+  but its renderer only works with `contextIsolation:true`, which is incompatible with the
+  sign-in stealth — every way to add the stealth blanks the page. There's no Electron config
+  where it both renders and signs in. Use Safari's **File → Add to Dock** (or a PWA in a
+  non-Chrome Chromium browser) for a standalone Messages app instead.
 - Web Calendar has no native snooze in notifications (a Google limitation, not this app).
 - Not affiliated with or endorsed by Google.
 

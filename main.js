@@ -15,26 +15,14 @@ const CHROME_UA =
 const SEC_CH_UA =
   '"Google Chrome";v="' + CHROME_MAJOR + '", "Chromium";v="' + CHROME_MAJOR + '", "Not.A/Brand";v="24"';
 
-// Stealth apps (Gmail/Calendar/Tasks/Keep) need contextIsolation:false so the preload can
-// patch the page's main world to pass Google's sign-in checks. QR-pairing apps (Google
-// Messages) render BLANK with contextIsolation:false and don't need the stealth — so they
-// get a normal, isolated config with no preload; native web notifications work there as-is.
-const USE_STEALTH = !/messages\.google\.com/.test(APP_URL);
-const WEBPREFS = USE_STEALTH
-  ? {
-      preload: path.join(__dirname, 'preload.js'),
-      contextIsolation: false, // preload must share the page's main world to patch navigator
-      sandbox: false,
-      nodeIntegration: false,
-      spellcheck: true,
-      backgroundThrottling: false, // keep this window's timers/connection live in the background
-    }
-  : {
-      contextIsolation: true,
-      nodeIntegration: false,
-      spellcheck: true,
-      backgroundThrottling: false,
-    };
+const STEALTH_WEBPREFS = {
+  preload: path.join(__dirname, 'preload.js'),
+  contextIsolation: false, // preload must share the page's main world to patch navigator
+  sandbox: false,
+  nodeIntegration: false,
+  spellcheck: true,
+  backgroundThrottling: false, // keep this window's timers/connection live in the background
+};
 
 app.setName(APP_NAME);
 app.userAgentFallback = CHROME_UA;
@@ -47,24 +35,21 @@ app.commandLine.appendSwitch('disable-background-timer-throttling');
 app.commandLine.appendSwitch('disable-renderer-backgrounding');
 app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
 
-// Set the Chrome UA and (for stealth apps) matching Client-Hint headers on every request.
-// For non-stealth apps (Messages) we must NOT rewrite sec-ch-ua: the page's JS still reports
-// Electron's real client hints, and a header/JS mismatch makes Google flag it "not secure".
-function spoofSession(sess, stealth) {
+// Force the Chrome UA + matching Client-Hint headers on every request. The preload spoofs
+// the page-side navigator to match, so there's no header/JS mismatch for Google to flag.
+function spoofSession(sess) {
   if (sess.__spoofed) return;
   sess.__spoofed = true;
   sess.setUserAgent(CHROME_UA);
-  if (stealth) {
-    sess.webRequest.onBeforeSendHeaders((details, cb) => {
-      const h = details.requestHeaders;
-      h['User-Agent'] = CHROME_UA;
-      h['sec-ch-ua'] = SEC_CH_UA;
-      h['sec-ch-ua-mobile'] = '?0';
-      h['sec-ch-ua-platform'] = '"macOS"';
-      delete h['X-Requested-With'];
-      cb({ requestHeaders: h });
-    });
-  }
+  sess.webRequest.onBeforeSendHeaders((details, cb) => {
+    const h = details.requestHeaders;
+    h['User-Agent'] = CHROME_UA;
+    h['sec-ch-ua'] = SEC_CH_UA;
+    h['sec-ch-ua-mobile'] = '?0';
+    h['sec-ch-ua-platform'] = '"macOS"';
+    delete h['X-Requested-With'];
+    cb({ requestHeaders: h });
+  });
 
   // Grant the web permissions Google services need — most importantly notifications,
   // which Electron then forwards to the native macOS Notification Center.
@@ -114,14 +99,14 @@ function openAccountWindow(n) {
 
   const partition = 'persist:account-' + n; // isolated, persistent cookie jar per account
   const sess = session.fromPartition(partition);
-  spoofSession(sess, USE_STEALTH);
+  spoofSession(sess);
 
   const win = new BrowserWindow({
     width: 1280,
     height: 860,
     title: APP_NAME + ' — Account ' + n,
     backgroundColor: '#ffffff',
-    webPreferences: Object.assign({ partition }, WEBPREFS),
+    webPreferences: Object.assign({ partition }, STEALTH_WEBPREFS),
   });
 
   win.webContents.setUserAgent(CHROME_UA);
@@ -133,7 +118,7 @@ function openAccountWindow(n) {
       if (isGoogleHost(host)) {
         return {
           action: 'allow',
-          overrideBrowserWindowOptions: { webPreferences: Object.assign({ partition }, WEBPREFS) },
+          overrideBrowserWindowOptions: { webPreferences: Object.assign({ partition }, STEALTH_WEBPREFS) },
         };
       }
     } catch (e) { /* fall through */ }
