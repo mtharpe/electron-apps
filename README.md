@@ -161,15 +161,30 @@ Then rebuild.
 
 ---
 
+## Google Messages
+
+Messages **can't** be one of these Electron apps: it now requires Google sign-in (QR
+pairing was removed), but its renderer only works with `contextIsolation:true`, which is
+incompatible with the sign-in stealth — every way to add the stealth blanks the page, and
+without it Google blocks sign-in. There's no Electron config where it both renders **and**
+signs in.
+
+Set it up as a **Safari web app** instead (real browser → sign-in works, standalone icon,
+notifications, no Chrome):
+
+1. Open `https://messages.google.com/web/` in **Safari**, sign in.
+2. **File → Add to Dock** → name it *Google Messages* → Add.
+3. Give it the matching icon from this repo:
+   ```bash
+   ./set-messages-icon.sh            # applies icons/messages.icns to ~/Applications/Messages.app
+   ```
+   (A PWA in a non-Chrome Chromium browser like Brave/Edge works too.)
+
 ## Limitations
 
-- Apple Silicon (arm64) only as configured; add `--arch=x64` in `build.sh` for Intel.
+- Builds for the **host architecture** automatically (Apple Silicon `arm64` or Intel `x64`,
+  via `uname -m`); export `ARCH=universal` before `./build.sh` for a fat binary.
 - Google Tasks has no standalone page; it uses the embedded Tasks view.
-- **Google Messages is not included.** It now requires Google sign-in (QR pairing removed),
-  but its renderer only works with `contextIsolation:true`, which is incompatible with the
-  sign-in stealth — every way to add the stealth blanks the page. There's no Electron config
-  where it both renders and signs in. Use Safari's **File → Add to Dock** (or a PWA in a
-  non-Chrome Chromium browser) for a standalone Messages app instead.
 - Web Calendar has no native snooze in notifications (a Google limitation, not this app).
 - Not affiliated with or endorsed by Google.
 

@@ -6,6 +6,10 @@ set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$DIR"
 
+# Build for the host architecture so the apps run natively on Apple Silicon (arm64)
+# or Intel (x86_64 -> x64). Override by exporting ARCH=universal for a fat binary.
+ARCH="${ARCH:-$([ "$(uname -m)" = "x86_64" ] && echo x64 || echo arm64)}"
+
 # service | icon-name | url | bundle-id
 SERVICES=(
   "Gmail|gmail|https://mail.google.com/|com.miketharpe.gmailapp"
@@ -25,7 +29,7 @@ for entry in "${SERVICES[@]}"; do
   IFS='|' read -r name icon url bid <<< "$entry"
   echo "==> Building $name"
   /usr/bin/python3 -c "import json,sys; json.dump({'name':sys.argv[1],'url':sys.argv[2]}, open('app-config.json','w'))" "$name" "$url"
-  npx electron-packager . "$name" --platform=darwin --arch=arm64 \
+  npx electron-packager . "$name" --platform=darwin --arch="$ARCH" \
     --icon="$DIR/icons/$icon.icns" --app-bundle-id="$bid" --app-version=1.0.0 \
     --ignore="/build" --ignore="/icons" --ignore="\.sh$" --ignore="\.md$" \
     --out="$DIR/build" --overwrite >/dev/null
