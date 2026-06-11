@@ -1,6 +1,7 @@
 const { app, BrowserWindow, Menu, session, shell, Notification, ipcMain, powerMonitor } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const { execFile } = require('child_process');
 
 const cfg = JSON.parse(fs.readFileSync(path.join(__dirname, 'app-config.json'), 'utf8'));
 const APP_NAME = cfg.name;
@@ -90,6 +91,15 @@ function isGoogleHost(host) {
   return /(^|\.)(google\.com|gstatic\.com|googleusercontent\.com|googleapis\.com|google\.[a-z.]+)$/.test(host);
 }
 
+// Open external links (e.g. links inside emails) in the user's Chrome browser,
+// falling back to the system default browser if Chrome isn't installed.
+function openInChrome(url) {
+  if (!/^https?:\/\//i.test(url || '')) { if (url) shell.openExternal(url); return; }
+  execFile('open', ['-a', 'Google Chrome', url], (err) => {
+    if (err) shell.openExternal(url);
+  });
+}
+
 function openAccountWindow(n) {
   const existing = windows.get(n);
   if (existing && !existing.isDestroyed()) {
@@ -111,18 +121,24 @@ function openAccountWindow(n) {
 
   win.webContents.setUserAgent(CHROME_UA);
 
-  // target=_blank / pop-outs (Gmail compose, etc.): keep Google links in-app & isolated; send the rest to the default browser.
+  // target=_blank / pop-outs: open links inside emails (and any external link) in Chrome;
+  // keep the app's own Google UI (compose pop-outs, sign-in) in-app & isolated.
   win.webContents.setWindowOpenHandler(({ url }) => {
     try {
-      const host = new URL(url).hostname;
-      if (isGoogleHost(host)) {
+      const u = new URL(url);
+      // Gmail wraps links inside emails in a google.com/url?q=<target> redirector → Chrome.
+      if (/(^|\.)google\.com$/.test(u.hostname) && u.pathname === '/url') {
+        openInChrome(u.searchParams.get('q') || u.searchParams.get('url') || url);
+        return { action: 'deny' };
+      }
+      if (isGoogleHost(u.hostname)) {
         return {
           action: 'allow',
           overrideBrowserWindowOptions: { webPreferences: Object.assign({ partition }, STEALTH_WEBPREFS) },
         };
       }
-    } catch (e) { /* fall through */ }
-    shell.openExternal(url);
+    } catch (e) { /* fall through to Chrome */ }
+    openInChrome(url);
     return { action: 'deny' };
   });
 
