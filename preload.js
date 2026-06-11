@@ -88,69 +88,45 @@
     }
   } catch (e) {}
 
-  // 7) Mirror page-level AND service-worker notifications through the native
-  //    main-process Notification (the path proven to render banners on macOS).
+  // 7) Mirror page-level AND service-worker notifications to the native banner path —
+  //    WITHOUT disturbing the page's own notification objects/flows. We keep the real
+  //    Notification object (so Google's code, instanceof checks, and service-worker sync
+  //    are untouched) and merely send a parallel copy to the native main process.
   try {
-    const pending = Object.create(null);
     let seq = 0;
-    const fire = (title, options, instance) => {
+    const fire = (title, options) => {
       options = options || {};
-      const id = 'n' + (++seq);
-      if (instance) pending[id] = instance;
       if (ipc) {
         ipc.send('mirror-notification', {
-          id: id,
+          id: 'n' + (++seq),
           title: String(title == null ? '' : title),
           body: String(options.body || ''),
           tag: String(options.tag || ''),
         });
       }
-      return id;
     };
 
-    if (ipc) {
-      ipc.on('mirror-notification-click', (_e, id) => {
-        const inst = pending[id];
-        if (inst && typeof inst._onclick === 'function') {
-          try { inst._onclick({ type: 'click' }); } catch (e) {}
-        }
+    // 7a) page-level Notification — wrap construction via a Proxy; the returned object is
+    //     still a genuine Notification.
+    if (window.Notification) {
+      window.Notification = new Proxy(window.Notification, {
+        construct(target, argList) {
+          try { fire(argList[0], argList[1]); } catch (e) {}
+          return Reflect.construct(target, argList, target);
+        },
       });
     }
 
-    // 7a) page-level Notification → replace with a mirroring shim
-    const RealNotification = window.Notification;
-    function MirrorNotification(title, options) {
-      this._onclick = null;
-      this._id = fire(title, options, this);
-    }
-    MirrorNotification.prototype.close = function () {};
-    MirrorNotification.prototype.addEventListener = function (type, cb) {
-      if (type === 'click') this._onclick = cb;
-    };
-    MirrorNotification.prototype.removeEventListener = function () {};
-    MirrorNotification.prototype.dispatchEvent = function () { return true; };
-    Object.defineProperty(MirrorNotification.prototype, 'onclick', {
-      configurable: true,
-      get: function () { return this._onclick; },
-      set: function (fn) { this._onclick = fn; },
-    });
-    Object.defineProperty(MirrorNotification, 'permission', { configurable: true, get: () => 'granted' });
-    MirrorNotification.requestPermission = function (cb) {
-      if (typeof cb === 'function') { try { cb('granted'); } catch (e) {} }
-      return Promise.resolve('granted');
-    };
-    MirrorNotification.maxActions = (RealNotification && RealNotification.maxActions) || 2;
-    window.Notification = MirrorNotification;
-
-    // 7b) service-worker notifications (registration.showNotification)
+    // 7b) service-worker notifications — mirror, then call the ORIGINAL so the page's own
+    //     notification/sync logic still runs.
     if (window.ServiceWorkerRegistration &&
         ServiceWorkerRegistration.prototype &&
         ServiceWorkerRegistration.prototype.showNotification) {
+      const origShow = ServiceWorkerRegistration.prototype.showNotification;
       ServiceWorkerRegistration.prototype.showNotification = function (title, options) {
-        fire(title, options, null);
-        return Promise.resolve();
+        try { fire(title, options); } catch (e) {}
+        try { return origShow.apply(this, arguments); } catch (e) { return Promise.resolve(); }
       };
-      ServiceWorkerRegistration.prototype.getNotifications = function () { return Promise.resolve([]); };
     }
   } catch (e) {}
 })();
