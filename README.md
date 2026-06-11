@@ -79,11 +79,12 @@ right-click → **Options → Keep in Dock**.
   **System Settings → Notifications → \<app\> → Alert style → Alerts**.
 
 ### Google Messages
-Messages pairs by **QR code**, not a Google login. On first launch, open the **Messages**
-app on your phone → **Device pairing → Scan QR code**, and enable **"Remember this
-computer."** The persistent session keeps it paired across restarts, and the app must stay
-running (background throttling is disabled, so it stays connected) to receive messages and
-fire notifications.
+Messages runs **without** the sign-in stealth (it renders blank with `contextIsolation:false`),
+so pair it by **QR code**, not the Google-account "Sign In" button (that path is blocked in
+a non-stealth window). On first launch, click **"Pair with QR code"**, then on your phone open
+**Messages → Device pairing → Scan QR code**, and enable **"Remember this computer."** The
+persistent session keeps it paired across restarts, and the app must stay running (background
+throttling is disabled, so it stays connected) to receive messages and fire notifications.
 
 ### Keyboard shortcuts
 | Shortcut | Action |
@@ -172,6 +173,8 @@ Then rebuild.
 
 - Apple Silicon (arm64) only as configured; add `--arch=x64` in `build.sh` for Intel.
 - Google Tasks has no standalone page; it uses the embedded Tasks view.
+- Google Messages is **QR-pairing only** — its renderer needs `contextIsolation:true`, which
+  is incompatible with the sign-in stealth, so the Google-account "Sign In" path is blocked.
 - Web Calendar has no native snooze in notifications (a Google limitation, not this app).
 - Not affiliated with or endorsed by Google.
 
