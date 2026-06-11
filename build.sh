@@ -12,6 +12,7 @@ SERVICES=(
   "Google Calendar|calendar|https://calendar.google.com/|com.miketharpe.calendarapp"
   "Google Tasks|tasks|https://tasks.google.com/embed/?origin=https://calendar.google.com&fullWidth=1|com.miketharpe.tasksapp"
   "Google Keep|keep|https://keep.google.com/|com.miketharpe.keepapp"
+  "Google Messages|messages|https://messages.google.com/web/|com.miketharpe.messagesapp"
 )
 
 # Install build deps on first run (electron + packager are devDependencies).

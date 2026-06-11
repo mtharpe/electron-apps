@@ -1,8 +1,8 @@
 # Google Standalone Apps for macOS
 
-Turn **Gmail, Google Calendar, Google Tasks, and Google Keep** into real, standalone
-macOS apps — each with its own icon, its own Dock/⌘-Tab identity, dark window chrome,
-and **native macOS notifications** — fully independent of Chrome.
+Turn **Gmail, Google Calendar, Google Tasks, Google Keep, and Google Messages** into real,
+standalone macOS apps — each with its own icon, its own Dock/⌘-Tab identity, dark window
+chrome, and **native macOS notifications** — fully independent of Chrome.
 
 Unlike Chrome PWAs, these are genuine separate applications. Unlike plain
 [Nativefier](https://github.com/nativefier/nativefier), they actually get **past Google's
@@ -77,6 +77,13 @@ right-click → **Options → Keep in Dock**.
   another app. Test via **Help → Send Test Notification in 5s** (then click away).
 - For reminders that **persist** on screen, set
   **System Settings → Notifications → \<app\> → Alert style → Alerts**.
+
+### Google Messages
+Messages pairs by **QR code**, not a Google login. On first launch, open the **Messages**
+app on your phone → **Device pairing → Scan QR code**, and enable **"Remember this
+computer."** The persistent session keeps it paired across restarts, and the app must stay
+running (background throttling is disabled, so it stays connected) to receive messages and
+fire notifications.
 
 ### Keyboard shortcuts
 | Shortcut | Action |
