@@ -7,9 +7,12 @@ const cfg = JSON.parse(fs.readFileSync(path.join(__dirname, 'app-config.json'), 
 const APP_NAME = cfg.name;
 const APP_URL = cfg.url;
 
-// Pose as stock desktop Chrome. Paired with preload.js (which fixes the JS-side
-// fingerprints), this is what gets past Google's "browser may not be secure" gate.
-const CHROME_MAJOR = '138';
+// Pose as stock desktop Chrome. Report the REAL bundled Chromium major (not a hardcoded
+// number) so the spoofed version can never lag the engine after an Electron bump — a stale
+// major makes Google reject the app (Calendar then shows "could not load the data"). Paired
+// with preload.js (which fixes the JS-side fingerprints), this is what gets past Google's
+// "browser may not be secure" gate.
+const CHROME_MAJOR = process.versions.chrome.split('.')[0];
 const CHROME_UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 ' +
   '(KHTML, like Gecko) Chrome/' + CHROME_MAJOR + '.0.0.0 Safari/537.36';
@@ -87,8 +90,70 @@ ipcMain.on('mirror-notification', (event, n) => {
   native.show();
 });
 
+// True if `host` equals or is a subdomain of any suffix in the list. Suffix-matched rather
+// than regex'd, so lookalikes like "google.com.evil.com" / "google.evil.com" don't match.
+function hasSuffix(host, suffixes) {
+  host = String(host || '').toLowerCase();
+  return suffixes.some((s) => host === s || host.endsWith('.' + s));
+}
+
+// First-party Google hosts we keep IN-APP (anything else opens in the user's real browser).
+const GOOGLE_HOST_SUFFIXES = [
+  'google.com', 'gstatic.com', 'googleusercontent.com', 'googleapis.com',
+];
 function isGoogleHost(host) {
-  return /(^|\.)(google\.com|gstatic\.com|googleusercontent\.com|googleapis\.com|google\.[a-z.]+)$/.test(host);
+  return hasSuffix(host, GOOGLE_HOST_SUFFIXES);
+}
+
+// Enterprise SSO / identity-provider domains. Corporate Google Workspace sign-in commonly
+// redirects to a third-party IdP (Okta, Microsoft Entra, Ping, Duo, etc.) — frequently in a
+// popup window. Those popups must stay IN-APP, in the same session/cookie jar, so the SSO
+// flow can complete and hand control back to Google; if they were pushed out to the external
+// browser the login would break (different cookies, can't close/postback to the opener).
+const IDP_HOST_SUFFIXES = [
+  // Okta
+  'okta.com', 'oktapreview.com', 'okta-emea.com', 'oktacdn.com', 'okta-gov.com',
+  // Microsoft Entra ID / Azure AD
+  'microsoftonline.com', 'microsoftonline-p.com', 'login.microsoft.com',
+  'login.live.com', 'msftauth.net', 'msauth.net',
+  // Ping Identity
+  'pingidentity.com', 'pingone.com',
+  // OneLogin
+  'onelogin.com',
+  // Duo Security (MFA)
+  'duosecurity.com',
+  // Auth0
+  'auth0.com',
+  // JumpCloud
+  'jumpcloud.com',
+  // CyberArk Identity (formerly Idaptive)
+  'idaptive.app', 'cyberark.cloud',
+];
+
+// Companies often host SSO on a vanity domain (e.g. login.example.com) no built-in list can
+// predict. Let users add their own suffixes WITHOUT rebuilding: a comma/space-separated env
+// var (GOOGLE_APP_AUTH_DOMAINS) and/or a JSON array at <userData>/auth-domains.json. Read
+// once at startup.
+function loadExtraAuthSuffixes() {
+  const out = [];
+  try {
+    if (process.env.GOOGLE_APP_AUTH_DOMAINS) out.push(...process.env.GOOGLE_APP_AUTH_DOMAINS.split(/[,\s]+/));
+  } catch (e) { /* ignore */ }
+  try {
+    const f = path.join(app.getPath('userData'), 'auth-domains.json');
+    if (fs.existsSync(f)) {
+      const arr = JSON.parse(fs.readFileSync(f, 'utf8'));
+      if (Array.isArray(arr)) out.push(...arr);
+    }
+  } catch (e) { /* malformed file is non-fatal */ }
+  return out
+    .map((s) => String(s || '').trim().toLowerCase().replace(/^\.+/, ''))
+    .filter(Boolean);
+}
+const EXTRA_AUTH_SUFFIXES = loadExtraAuthSuffixes();
+
+function isAuthHost(host) {
+  return hasSuffix(host, IDP_HOST_SUFFIXES) || hasSuffix(host, EXTRA_AUTH_SUFFIXES);
 }
 
 // Open external links (e.g. links inside emails) in the user's Chrome browser,
@@ -122,7 +187,8 @@ function openAccountWindow(n) {
   win.webContents.setUserAgent(CHROME_UA);
 
   // target=_blank / pop-outs: open links inside emails (and any external link) in Chrome;
-  // keep the app's own Google UI (compose pop-outs, sign-in) in-app & isolated.
+  // keep the app's own Google UI (compose pop-outs, sign-in) AND enterprise SSO popups
+  // (Okta, Entra, etc.) in-app & isolated so corporate sign-in completes in-session.
   win.webContents.setWindowOpenHandler(({ url }) => {
     try {
       const u = new URL(url);
@@ -131,7 +197,7 @@ function openAccountWindow(n) {
         openInChrome(u.searchParams.get('q') || u.searchParams.get('url') || url);
         return { action: 'deny' };
       }
-      if (isGoogleHost(u.hostname)) {
+      if (isGoogleHost(u.hostname) || isAuthHost(u.hostname)) {
         return {
           action: 'allow',
           overrideBrowserWindowOptions: { webPreferences: Object.assign({ partition }, STEALTH_WEBPREFS) },

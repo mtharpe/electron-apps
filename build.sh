@@ -34,7 +34,7 @@ for entry in "${SERVICES[@]}"; do
     --ignore="/build" --ignore="/icons" --ignore="\.sh$" --ignore="\.md$" \
     --out="$DIR/build" --overwrite >/dev/null
   rm -rf "$HOME/Applications/$name.app"
-  cp -R "$DIR/build/$name-darwin-arm64/$name.app" "$HOME/Applications/"
+  cp -R "$DIR/build/$name-darwin-$ARCH/$name.app" "$HOME/Applications/"
   xattr -dr com.apple.quarantine "$HOME/Applications/$name.app" 2>/dev/null || true
   codesign --force --deep --sign - "$HOME/Applications/$name.app" >/dev/null 2>&1
   echo "    installed + signed: ~/Applications/$name.app"

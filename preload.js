@@ -3,7 +3,11 @@
 // Runs in the page's main world (contextIsolation:false) BEFORE the page's own scripts.
 (function () {
   'use strict';
-  const V = '138';
+  // Derive from the REAL bundled Chromium (via Node's process, available in this
+  // non-sandboxed preload) so the spoofed version can never lag the engine — a stale major
+  // makes Google reject the app (Calendar shows "could not load the data"). Read here,
+  // before the Node-global scrub in step 4 below.
+  const V = (((typeof process !== 'undefined') && process.versions && process.versions.chrome) || '148.0.0.0').split('.')[0];
 
   const def = (obj, prop, getter) => {
     try { Object.defineProperty(obj, prop, { get: getter, configurable: true }); } catch (e) {}

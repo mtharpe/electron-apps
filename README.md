@@ -128,13 +128,31 @@ main-process `Notification` — the path that reliably renders banners.
 Edit the `SERVICES` array in `build.sh` (`name | icon | url | bundle-id`), drop a matching
 `icons/<name>.icns` in place, and re-run `./build.sh`.
 
-### Bump the spoofed Chrome version
-If Google ever rejects the version as too old (symptom: Calendar shows *"Could not load the
-data"*, or sign-in misbehaves), raise the version in **both** files (keep them in sync):
-- `main.js` → `CHROME_MAJOR`
-- `preload.js` → `V`
+### Spoofed Chrome version
+The spoofed Chrome major is derived automatically from the real bundled Chromium
+(`process.versions.chrome`) in both `main.js` (`CHROME_MAJOR`) and `preload.js` (`V`), so it
+can never lag the engine. If Google ever rejects the version as too old (symptom: Calendar
+shows *"Could not load the data"*, or sign-in misbehaves), bump `electron` in
+`package.json` and rebuild — the spoofed version follows automatically.
 
-Then rebuild.
+### Enterprise SSO / third-party login (Okta, Microsoft Entra, …)
+Corporate Google Workspace sign-in usually redirects to a company identity provider — often
+in a popup. Those popups are kept **in-app, in the same session**, so the SSO flow completes
+and hands control back to Google (pushing them out to the external browser would break the
+login). The major IdPs are recognized out of the box: **Okta, Microsoft Entra ID / Azure AD,
+Ping Identity, OneLogin, Duo, Auth0, JumpCloud, CyberArk**.
+
+If your company hosts SSO on a **vanity domain** (e.g. `login.example.com`) that isn't one of
+those, add it — no rebuild needed — by either:
+- setting `GOOGLE_APP_AUTH_DOMAINS` (comma/space-separated suffixes) in the app's
+  environment, or
+- creating a JSON array at `~/Library/Application Support/<App Name>/auth-domains.json`, e.g.
+  ```json
+  ["login.example.com", "sso.example.com"]
+  ```
+
+Suffixes are matched against the host and its subdomains; lookalikes like `okta.com.evil.com`
+are correctly treated as external.
 
 ---
 
@@ -143,10 +161,11 @@ Then rebuild.
 | Symptom | Fix |
 |---|---|
 | "This browser or app may not be secure" at sign-in | The stealth layer should handle it; if it regresses, bump the Chrome version (above). |
-| Calendar: "Could not load the data. Please try reloading later." | Usually a stale session after the window sat idle/asleep — `⌘R` to reload (windows also auto-reload on wake). If it happens on first load, the spoofed Chrome version may be too old — bump `CHROME_MAJOR` / `V`. |
+| Calendar: "Could not load the data. Please try reloading later." | Usually a stale session after the window sat idle/asleep — `⌘R` to reload (windows also auto-reload on wake). If it happens on first load, the bundled Chromium may be too old for Google — bump `electron` in `package.json` and rebuild (the spoofed version follows automatically). |
 | Notification plays a sound but no banner | Expected if the app is frontmost (macOS suppresses it) — switch apps. Otherwise set the app's macOS notification style to **Alerts**. |
 | App won't open ("unidentified developer") | Apps are ad-hoc signed and built locally (not quarantined); if macOS still blocks, right-click → **Open** once. |
 | Need to re-login everywhere | Sessions are per-app and per-account-slot by design (full isolation). |
+| Corporate (SSO) sign-in opens in Chrome / can't complete | The IdP isn't recognized. If it's on a company vanity domain, add it via `GOOGLE_APP_AUTH_DOMAINS` or `auth-domains.json` (see **Enterprise SSO** above), then retry. |
 
 ---
 
