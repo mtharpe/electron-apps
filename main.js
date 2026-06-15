@@ -20,13 +20,45 @@ const GMAIL_RAIL_HIDE_CSS = `
 const mailHost = (h) => /(^|\.)mail\.google\.com$/.test(h);
 const IS_GMAIL_APP = (() => { try { return mailHost(new URL(APP_URL).hostname); } catch (e) { return false; } })();
 
-// Re-apply on every document load (account switches navigate to /mail/u/N as full loads).
+// Re-apply on every document load. This must cover EVERY webContents, not just the first
+// account window: picking another account from Gmail's switcher opens it in a NEW window,
+// and that window needs the rule too. Registered globally below via 'web-contents-created'.
 function applyGmailNormalization(wc) {
-  if (!IS_GMAIL_APP) return;
   wc.on('dom-ready', () => {
     try { if (mailHost(new URL(wc.getURL()).hostname)) wc.insertCSS(GMAIL_RAIL_HIDE_CSS); } catch (e) { /* ignore */ }
   });
 }
+
+// Window title = JUST the account/org name (e.g. "Spectro Cloud", "Gmail") so each account's
+// window is easy to pick out in ⌘-Tab / Mission Control / the Window menu. Google puts the org
+// name in the page title for Gmail & Calendar; Keep/Tasks don't, so we fall back to the
+// signed-in email (read from the account avatar), then to whatever the page title is.
+const ACCOUNT_TITLE_JS = `(function(){
+  function s(x){return (x||'').trim();}
+  var host=location.hostname, t=document.title||'';
+  if (/mail\\.google\\.com$/.test(host)) { var p=t.split(' - '); return s((p[p.length-1]||'').replace(/\\s*Mail$/,'')); }
+  if (/calendar\\.google\\.com$/.test(host)) { return s(t.split(' - ')[0]); }
+  var a=document.querySelector('[aria-label*="Google Account" i]');
+  if (a) { var m=(a.getAttribute('aria-label')||'').match(/[\\w.+-]+@[\\w.-]+\\.[A-Za-z]{2,}/); if (m) return m[0]; }
+  return s(t);
+})()`;
+
+function manageWindowTitle(wc) {
+  const apply = () => {
+    wc.executeJavaScript(ACCOUNT_TITLE_JS, true).then((label) => {
+      const win = BrowserWindow.fromWebContents(wc);
+      if (win && !win.isDestroyed() && label) win.setTitle(label);
+    }).catch(() => { /* ignore */ });
+  };
+  // Stop Electron from auto-applying Google's full page title, then set our short one.
+  wc.on('page-title-updated', (e) => { e.preventDefault(); apply(); });
+  wc.on('dom-ready', apply);
+}
+
+app.on('web-contents-created', (e, wc) => {
+  if (IS_GMAIL_APP) applyGmailNormalization(wc);
+  manageWindowTitle(wc);
+});
 
 // Pose as stock desktop Chrome. Report the REAL bundled Chromium major (not a hardcoded
 // number) so the spoofed version can never lag the engine after an Electron bump — a stale
@@ -211,7 +243,6 @@ function openAccountWindow(n) {
   });
 
   win.webContents.setUserAgent(CHROME_UA);
-  applyGmailNormalization(win.webContents);
 
   // target=_blank / pop-outs: open links inside emails (and any external link) in Chrome;
   // keep the app's own Google UI (compose pop-outs, sign-in) AND enterprise SSO popups
