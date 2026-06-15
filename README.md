@@ -21,6 +21,14 @@ notification banners** (not just a sound).
 - **Multiple accounts, isolated** — every window uses its own persistent session
   (separate cookie jar), so each window can be a different Google account. Open as many
   as you like (`⌘N`, or the **Accounts** menu / `⌘1`–`⌘6`).
+- **Enterprise SSO works** — corporate Workspace sign-in that redirects to a third-party
+  identity provider (Okta, Microsoft Entra, Ping, Duo, …) completes **in-app**, even when
+  the IdP opens in a popup. Vanity SSO domains are configurable without a rebuild.
+- **Per-account window titles** — each window is titled with just the account/org name
+  (e.g. *Spectro Cloud*), so account windows are easy to tell apart in ⌘-Tab / Mission
+  Control / the **Window** menu.
+- **Consistent Gmail view** — Workspace Gmail's extra left **Mail/Chat/Meet/Spaces** rail
+  is hidden so every account looks like clean personal Gmail.
 - **Native macOS notifications** — web and service-worker notifications are mirrored to
   the native notification path, so Calendar reminders / new-mail alerts show as real
   banners in Notification Center.
@@ -96,9 +104,9 @@ built with [`@electron/packager`](https://github.com/electron/packager).
 
 | File | Role |
 |---|---|
-| `main.js` | Main process: per-account isolated windows, menus, request-header spoofing, permission grants, the **notification mirror** IPC handler, maximize-on-start. |
+| `main.js` | Main process: per-account isolated windows, menus, request-header spoofing, permission grants, the **notification mirror** IPC handler, **enterprise-SSO routing**, **per-account window titles**, the **Gmail view normalizer**, maximize-on-start. |
 | `preload.js` | Runs in the page's main world; the **stealth layer** + the client-side **notification mirror**. |
-| `build.sh` | Builds/installs/signs all four; service list lives in the `SERVICES` array. |
+| `build.sh` | Builds/installs/signs all four; service list lives in the `SERVICES` array. Builds for the host arch (or `ARCH=universal`). |
 | `icons/` | 1024px `.icns` app icons. |
 
 ### Getting past Google's login block
@@ -119,6 +127,35 @@ a sound). So `preload.js` intercepts both **page-level** `Notification` and
 **service-worker** `showNotification`, and forwards them over IPC
 (`mirror-notification`) to `main.js`, which shows them through Electron's native
 main-process `Notification` — the path that reliably renders banners.
+
+### Sandboxed renderer
+Windows run with `contextIsolation: false` (so the stealth preload can patch the page's
+main world) **and `sandbox: true`**. The sandbox matters beyond security: with *both* off,
+Google Calendar's live-data channel (`signaler-pa.clients6.google.com`) intermittently
+failed for **secondary** multi-login accounts — the "Could not load the data" error on
+Workspace calendars. A sandboxed preload still patches the main world and still reaches
+`ipcRenderer` (via `require('electron')`) for the notification mirror, so nothing is lost.
+
+### Enterprise SSO routing
+Most navigation to non-Google hosts opens in your real browser, but `main.js` keeps known
+**identity-provider** hosts (Okta, Entra, Ping, OneLogin, Duo, Auth0, JumpCloud, CyberArk,
+plus any you configure) **in-app, in the same session**, including when the IdP opens in a
+popup — so corporate sign-in can complete and hand back to Google. Host matching is
+suffix-based, so lookalikes (`okta.com.evil.com`) are correctly treated as external.
+
+### Per-account window titles
+A global `web-contents-created` hook titles each window with just the account/org name and
+re-applies it on every load (suppressing Google's own long page title). Gmail & Calendar
+expose the org name in their page title (*Spectro Cloud*, *Google Calendar*, …); **Keep**
+has no org name in its title so it falls back to the signed-in **email**; **Tasks** stays
+*Tasks* (a single embedded view with no per-account context).
+
+### Consistent Gmail view
+For the Gmail app only, `main.js` injects a stylesheet that hides Workspace Gmail's left
+**Mail/Chat/Meet/Spaces** app-rail so every account matches the clean personal-Gmail
+layout. The rule targets the rail via `:has()` anchored on the buttons' stable `aria-label`s
+(not Gmail's churning class names), is injected as a stylesheet (which survives Gmail's
+re-renders), and is applied to every window — including account-switch windows.
 
 ---
 
@@ -161,7 +198,8 @@ are correctly treated as external.
 | Symptom | Fix |
 |---|---|
 | "This browser or app may not be secure" at sign-in | The stealth layer should handle it; if it regresses, bump the Chrome version (above). |
-| Calendar: "Could not load the data. Please try reloading later." | Usually a stale session after the window sat idle/asleep — `⌘R` to reload (windows also auto-reload on wake). If it happens on first load, the bundled Chromium may be too old for Google — bump `electron` in `package.json` and rebuild (the spoofed version follows automatically). |
+| Calendar: "Could not load the data" on a **Workspace** calendar | Fixed by the sandboxed renderer (secondary multi-login accounts no longer fail). If it ever recurs: `⌘R` to reload (windows also auto-reload on wake); if it happens on *first* load for everyone, the bundled Chromium may be too old — bump `electron` in `package.json` and rebuild. |
+| Gmail still shows the Mail/Chat/Meet left rail | Make sure you relaunched the rebuilt app (⌘Q first). The hider keys off the buttons' `aria-label`s; if a Gmail redesign changes them it'll quietly stop matching — open an issue / update the selector in `main.js` (`GMAIL_RAIL_HIDE_CSS`). |
 | Notification plays a sound but no banner | Expected if the app is frontmost (macOS suppresses it) — switch apps. Otherwise set the app's macOS notification style to **Alerts**. |
 | App won't open ("unidentified developer") | Apps are ad-hoc signed and built locally (not quarantined); if macOS still blocks, right-click → **Open** once. |
 | Need to re-login everywhere | Sessions are per-app and per-account-slot by design (full isolation). |
@@ -174,8 +212,10 @@ are correctly treated as external.
 - The User-Agent / fingerprint spoofing exists solely to let **your own** Google accounts
   sign in to **your own** standalone apps — it doesn't bypass any authentication.
 - `contextIsolation` is disabled because the stealth preload must run in the page's main
-  world. These wrappers load only first-party Google URLs; external links open in your
-  default browser.
+  world, but the renderer **sandbox stays on** (`sandbox: true`). These wrappers load only
+  first-party Google URLs (plus recognized SSO providers during sign-in); other external
+  links open in your default browser. Google-host matching is suffix-based, so lookalike
+  domains are treated as external.
 - Apps are **ad-hoc** code-signed for local use, not notarized for distribution.
 
 ---
