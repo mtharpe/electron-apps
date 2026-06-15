@@ -7,6 +7,27 @@ const cfg = JSON.parse(fs.readFileSync(path.join(__dirname, 'app-config.json'), 
 const APP_NAME = cfg.name;
 const APP_URL = cfg.url;
 
+// Normalize Workspace Gmail to match personal Gmail by hiding the left Mail/Chat/Meet/Spaces
+// "app-rail" that Workspace accounts show (personal accounts don't). Anchored on the buttons'
+// stable aria-labels via :has() — not Gmail's churning class names — so it keeps working
+// across redesigns and harmlessly matches nothing if the rail ever goes away. Injected as a
+// stylesheet (not an inline style) so it survives Gmail's re-renders.
+const GMAIL_RAIL_HIDE_CSS = `
+[role="navigation"]:has([role="link"][aria-label^="Chat"]),
+[role="navigation"]:has([role="link"][aria-label="Meet"]),
+[role="navigation"]:has([role="link"][aria-label^="Spaces"]) { display: none !important; }
+`;
+const mailHost = (h) => /(^|\.)mail\.google\.com$/.test(h);
+const IS_GMAIL_APP = (() => { try { return mailHost(new URL(APP_URL).hostname); } catch (e) { return false; } })();
+
+// Re-apply on every document load (account switches navigate to /mail/u/N as full loads).
+function applyGmailNormalization(wc) {
+  if (!IS_GMAIL_APP) return;
+  wc.on('dom-ready', () => {
+    try { if (mailHost(new URL(wc.getURL()).hostname)) wc.insertCSS(GMAIL_RAIL_HIDE_CSS); } catch (e) { /* ignore */ }
+  });
+}
+
 // Pose as stock desktop Chrome. Report the REAL bundled Chromium major (not a hardcoded
 // number) so the spoofed version can never lag the engine after an Electron bump — a stale
 // major makes Google reject the app (Calendar then shows "could not load the data"). Paired
@@ -190,6 +211,7 @@ function openAccountWindow(n) {
   });
 
   win.webContents.setUserAgent(CHROME_UA);
+  applyGmailNormalization(win.webContents);
 
   // target=_blank / pop-outs: open links inside emails (and any external link) in Chrome;
   // keep the app's own Google UI (compose pop-outs, sign-in) AND enterprise SSO popups
