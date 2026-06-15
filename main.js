@@ -22,7 +22,12 @@ const SEC_CH_UA =
 const STEALTH_WEBPREFS = {
   preload: path.join(__dirname, 'preload.js'),
   contextIsolation: false, // preload must share the page's main world to patch navigator
-  sandbox: false,
+  // Keep the renderer sandboxed. contextIsolation:false WITH sandbox:false intermittently
+  // breaks Google Calendar data loading for SECONDARY multi-login accounts (the cross-origin
+  // signaler-pa.clients6.google.com channel fails with net::ERR_FAILED → "could not load the
+  // data"); sandbox:true fixes it. The preload still patches the main world (sign-in stealth)
+  // and still gets ipcRenderer via require('electron') (notification mirror) when sandboxed.
+  sandbox: true,
   nodeIntegration: false,
   spellcheck: true,
   backgroundThrottling: false, // keep this window's timers/connection live in the background
