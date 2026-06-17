@@ -29,6 +29,9 @@ notification banners** (not just a sound).
   Control / the **Window** menu.
 - **Consistent Gmail view** — Workspace Gmail's extra left **Mail/Chat/Meet/Spaces** rail
   is hidden so every account looks like clean personal Gmail.
+- **Links open in your browser** — links that leave Google (in emails, Calendar events, …)
+  open in Chrome / your default browser, from **every** window — including secondary account
+  windows opened by the account switcher.
 - **Native macOS notifications** — web and service-worker notifications are mirrored to
   the native notification path, so Calendar reminders / new-mail alerts show as real
   banners in Notification Center.
@@ -104,7 +107,7 @@ built with [`@electron/packager`](https://github.com/electron/packager).
 
 | File | Role |
 |---|---|
-| `main.js` | Main process: per-account isolated windows, menus, request-header spoofing, permission grants, the **notification mirror** IPC handler, **enterprise-SSO routing**, **per-account window titles**, the **Gmail view normalizer**, maximize-on-start. |
+| `main.js` | Main process: per-account isolated windows, menus, request-header spoofing, permission grants, the **notification mirror** IPC handler, **external-link routing** (every window), **enterprise-SSO routing**, **per-account window titles**, the **Gmail view normalizer**, maximize-on-start. |
 | `preload.js` | Runs in the page's main world; the **stealth layer** + the client-side **notification mirror**. |
 | `build.sh` | Builds/installs/signs all four; service list lives in the `SERVICES` array. Builds for the host arch (or `ARCH=universal`). |
 | `icons/` | 1024px `.icns` app icons. |
@@ -142,6 +145,16 @@ Most navigation to non-Google hosts opens in your real browser, but `main.js` ke
 plus any you configure) **in-app, in the same session**, including when the IdP opens in a
 popup — so corporate sign-in can complete and hand back to Google. Host matching is
 suffix-based, so lookalikes (`okta.com.evil.com`) are correctly treated as external.
+
+### External link routing
+Links that leave Google (links inside emails, Calendar event details, etc.) open in your
+real browser — Google Chrome, falling back to the system default. First-party Google UI
+(compose pop-outs, sign-in) and recognized SSO popups stay **in-app, in the same session**.
+This router is attached globally via `web-contents-created`, so it covers **every** window —
+including the secondary account windows that Gmail/Calendar's account switcher opens. (It used
+to be attached only to the first window, so links clicked in a second account's window opened
+a dead in-app window instead of the browser.) Allowed in-app child windows inherit the opener's
+per-account session, so they stay in the right cookie jar.
 
 ### Per-account window titles
 A global `web-contents-created` hook titles each window with just the account/org name and
@@ -204,6 +217,7 @@ are correctly treated as external.
 | App won't open ("unidentified developer") | Apps are ad-hoc signed and built locally (not quarantined); if macOS still blocks, right-click → **Open** once. |
 | Need to re-login everywhere | Sessions are per-app and per-account-slot by design (full isolation). |
 | Corporate (SSO) sign-in opens in Chrome / can't complete | The IdP isn't recognized. If it's on a company vanity domain, add it via `GOOGLE_APP_AUTH_DOMAINS` or `auth-domains.json` (see **Enterprise SSO** above), then retry. |
+| Clicking a link in a **second** account's window does nothing | Fixed — link routing now runs in every window, not just the first. Relaunch the rebuilt app (⌘Q first). |
 
 ---
 
