@@ -58,6 +58,7 @@ function manageWindowTitle(wc) {
 app.on('web-contents-created', (e, wc) => {
   if (IS_GMAIL_APP) applyGmailNormalization(wc);
   manageWindowTitle(wc);
+  attachExternalLinkRouting(wc);
 });
 
 // Pose as stock desktop Chrome. Report the REAL bundled Chromium major (not a hardcoded
@@ -223,6 +224,38 @@ function openInChrome(url) {
   });
 }
 
+// target=_blank / pop-outs: open links inside emails & calendar events (and any external link)
+// in Chrome; keep the app's own Google UI (compose pop-outs, sign-in) AND enterprise SSO popups
+// (Okta, Entra, etc.) in-app & isolated so corporate sign-in completes in-session.
+//
+// Registered on EVERY webContents via 'web-contents-created' — NOT just the first account
+// window. Switching accounts in Gmail/Calendar opens the next account in a NEW window (via the
+// 'allow' branch below); that window needs the handler too, or clicking a link in it falls
+// through to Electron's default (a dead in-app window) instead of opening the real browser.
+// The new window inherits its opener's persist:account-N session; we tag that session with
+// __partition (see openAccountWindow) so the allowed child stays in the same cookie jar.
+function attachExternalLinkRouting(wc) {
+  wc.setWindowOpenHandler(({ url }) => {
+    try {
+      const u = new URL(url);
+      // Gmail wraps links inside emails in a google.com/url?q=<target> redirector → Chrome.
+      if (/(^|\.)google\.com$/.test(u.hostname) && u.pathname === '/url') {
+        openInChrome(u.searchParams.get('q') || u.searchParams.get('url') || url);
+        return { action: 'deny' };
+      }
+      if (isGoogleHost(u.hostname) || isAuthHost(u.hostname)) {
+        const part = wc.session && wc.session.__partition;
+        const webPreferences = part
+          ? Object.assign({ partition: part }, STEALTH_WEBPREFS)
+          : STEALTH_WEBPREFS;
+        return { action: 'allow', overrideBrowserWindowOptions: { webPreferences } };
+      }
+    } catch (e) { /* fall through to Chrome */ }
+    openInChrome(url);
+    return { action: 'deny' };
+  });
+}
+
 function openAccountWindow(n) {
   const existing = windows.get(n);
   if (existing && !existing.isDestroyed()) {
@@ -233,6 +266,9 @@ function openAccountWindow(n) {
   const partition = 'persist:account-' + n; // isolated, persistent cookie jar per account
   const sess = session.fromPartition(partition);
   spoofSession(sess);
+  // Remember which partition this session belongs to so attachExternalLinkRouting can keep
+  // any allowed child window (account switcher, SSO popup) in the same cookie jar.
+  sess.__partition = partition;
 
   const win = new BrowserWindow({
     width: 1280,
@@ -244,27 +280,8 @@ function openAccountWindow(n) {
 
   win.webContents.setUserAgent(CHROME_UA);
 
-  // target=_blank / pop-outs: open links inside emails (and any external link) in Chrome;
-  // keep the app's own Google UI (compose pop-outs, sign-in) AND enterprise SSO popups
-  // (Okta, Entra, etc.) in-app & isolated so corporate sign-in completes in-session.
-  win.webContents.setWindowOpenHandler(({ url }) => {
-    try {
-      const u = new URL(url);
-      // Gmail wraps links inside emails in a google.com/url?q=<target> redirector → Chrome.
-      if (/(^|\.)google\.com$/.test(u.hostname) && u.pathname === '/url') {
-        openInChrome(u.searchParams.get('q') || u.searchParams.get('url') || url);
-        return { action: 'deny' };
-      }
-      if (isGoogleHost(u.hostname) || isAuthHost(u.hostname)) {
-        return {
-          action: 'allow',
-          overrideBrowserWindowOptions: { webPreferences: Object.assign({ partition }, STEALTH_WEBPREFS) },
-        };
-      }
-    } catch (e) { /* fall through to Chrome */ }
-    openInChrome(url);
-    return { action: 'deny' };
-  });
+  // Link routing (target=_blank / pop-outs → Chrome, Google/SSO popups in-app) is attached
+  // globally in 'web-contents-created' so it covers secondary account windows too.
 
   win.maximize();
   win.loadURL(APP_URL, { userAgent: CHROME_UA });
