@@ -69,6 +69,14 @@ const ACCOUNT_TITLE_JS = `(function(){
 
 function manageWindowTitle(wc) {
   const apply = () => {
+    // A configured account name (or the name of the Chrome profile it maps to) is a
+    // deliberate choice by the user and outranks anything scraped from the page.
+    const pinned = accountLabel(slotOf(wc));
+    if (pinned) {
+      const win = BrowserWindow.fromWebContents(wc);
+      if (win && !win.isDestroyed()) win.setTitle(pinned);
+      return;
+    }
     wc.executeJavaScript(ACCOUNT_TITLE_JS, true).then((label) => {
       const win = BrowserWindow.fromWebContents(wc);
       if (win && !win.isDestroyed() && label) win.setTitle(label);
@@ -83,6 +91,7 @@ app.on('web-contents-created', (e, wc) => {
   if (IS_GMAIL_APP) applyGmailNormalization(wc);
   manageWindowTitle(wc);
   attachExternalLinkRouting(wc);
+  wc.on('dom-ready', () => rememberAccountEmail(wc));
 });
 
 // Pose as stock desktop Chrome. Report the REAL bundled Chromium major (not a hardcoded
@@ -321,8 +330,275 @@ function watchPortalColorScheme() {
   }
 }
 
+// Accounts: a display name and a Chrome profile per account slot.
+//
+// Clicking a link used to hand the URL to `google-chrome <url>`, which drops it into
+// whichever profile window Chrome happens to have in focus — so a link from the work
+// account could land in the personal profile (or a profile that can't even see it).
+// Chrome takes --profile-directory=<dir> to pick the target explicitly, so each slot can
+// be pinned to one.
+//
+// The mapping is keyed by slot number rather than by email: the slot is what actually owns
+// the cookie jar (persist:account-N), it exists before any page has loaded, and it survives
+// the user signing a window into a different account.
+const ACCOUNT_SLOTS = 6;
+
+// chromeProfile is 'auto' (match the signed-in address to a Chrome profile), 'none' (hand
+// the URL over with no profile flag — Chrome's focused-window behaviour), or a profile
+// directory name such as 'Default' / 'Profile 2'.
+const PROFILE_AUTO = 'auto';
+const PROFILE_NONE = 'none';
+
+const accounts = new Map(); // slot -> { name, chromeProfile, email }
+
+// Deliberately NOT under userData: "Account 2 is Work" is a fact about the user's Google
+// accounts, not about Gmail-the-app, so all four apps share one file rather than making the
+// user name the same accounts four times. (Appearance stays per app — that one really is a
+// per-window preference.) The sessions themselves stay isolated per app as before; this
+// shares the labels and the routing, nothing else.
+const ACCOUNTS_DIR = path.join(app.getPath('appData'), 'google-standalone-apps');
+
+function accountsFile() {
+  return path.join(ACCOUNTS_DIR, 'accounts.json');
+}
+
+// Where this app's own copy used to live, before the file was shared.
+function legacyAccountsFile() {
+  return path.join(app.getPath('userData'), 'accounts.json');
+}
+
+function parseAccounts(text) {
+  const out = new Map();
+  const raw = JSON.parse(text);
+  for (const [k, v] of Object.entries(raw)) {
+    const n = Number(k);
+    if (!Number.isInteger(n) || n < 1 || !v || typeof v !== 'object') continue;
+    out.set(n, {
+      name: typeof v.name === 'string' ? v.name.trim() : '',
+      chromeProfile: typeof v.chromeProfile === 'string' ? v.chromeProfile : PROFILE_AUTO,
+      email: typeof v.email === 'string' ? v.email : '',
+    });
+  }
+  return out;
+}
+
+function loadAccounts() {
+  try {
+    const parsed = parseAccounts(fs.readFileSync(accountsFile(), 'utf8'));
+    accounts.clear();
+    for (const [n, cfg] of parsed) accounts.set(n, cfg);
+  } catch {
+    // Missing or corrupt: missing is the first run, corrupt should not wipe the mapping.
+  }
+  migrateLegacyAccounts();
+}
+
+// Fold this app's old per-app file into the shared one. Deliberately a merge rather than a
+// "shared file missing? adopt mine": the four apps start in any order, and the first of them
+// to detect an address creates the shared file — so a plain existence check would let
+// whichever app happened to start first discard names set in another.
+//
+// Only gaps are filled; anything already in the shared file was set after the split and wins.
+// The legacy file is then renamed rather than deleted, both so this runs once per app and so
+// the old values are still there if the merge ever gets it wrong.
+function migrateLegacyAccounts() {
+  const file = legacyAccountsFile();
+  let legacy;
+  try {
+    legacy = parseAccounts(fs.readFileSync(file, 'utf8'));
+  } catch {
+    return; // no per-app file (the normal case from here on)
+  }
+  const touched = [];
+  for (const [n, old] of legacy) {
+    const current = accounts.get(n);
+    if (!current) {
+      accounts.set(n, old);
+      touched.push(n);
+      continue;
+    }
+    const merged = Object.assign({}, current);
+    let changed = false;
+    if (!merged.name && old.name) { merged.name = old.name; changed = true; }
+    if (!merged.email && old.email) { merged.email = old.email; changed = true; }
+    if ((!merged.chromeProfile || merged.chromeProfile === PROFILE_AUTO)
+        && old.chromeProfile && old.chromeProfile !== PROFILE_AUTO) {
+      merged.chromeProfile = old.chromeProfile;
+      changed = true;
+    }
+    if (changed) { accounts.set(n, merged); touched.push(n); }
+  }
+  if (touched.length) persistSlots(touched);
+  try { fs.renameSync(file, file + '.migrated'); } catch (e) { /* leave it; the merge is idempotent */ }
+}
+
+// Write only the slots that actually changed, merging into whatever is on disk right now.
+// With four apps sharing one file, serializing this process's whole in-memory copy would
+// let a long-running app quietly revert a change another app made after it started.
+function persistSlots(slotNumbers) {
+  let onDisk = {};
+  try {
+    onDisk = JSON.parse(fs.readFileSync(accountsFile(), 'utf8')) || {};
+  } catch {
+    onDisk = {};
+  }
+  for (const n of slotNumbers) {
+    const cfg = accountConfig(n);
+    // A slot carrying no information is dropped rather than written as an empty record.
+    if (!cfg.name && !cfg.email && (!cfg.chromeProfile || cfg.chromeProfile === PROFILE_AUTO)) {
+      delete onDisk[n];
+    } else {
+      onDisk[n] = {
+        name: cfg.name || '',
+        chromeProfile: cfg.chromeProfile || PROFILE_AUTO,
+        email: cfg.email || '',
+      };
+    }
+  }
+  try {
+    fs.mkdirSync(ACCOUNTS_DIR, { recursive: true });
+    fs.writeFileSync(accountsFile(), JSON.stringify(onDisk, null, 2) + '\n');
+  } catch (e) {
+    // Same tradeoff as the appearance file: losing the write costs the setting, not the app.
+  }
+}
+
+// Pick up changes made in one of the other three apps while this one is running, so a name
+// set in Gmail shows up in Calendar's Accounts menu without restarting it. Watching the
+// directory rather than the file survives the write replacing the inode.
+let accountsWatcher = null;
+let accountsReloadTimer = null;
+function watchAccountsFile() {
+  if (accountsWatcher) return;
+  try {
+    fs.mkdirSync(ACCOUNTS_DIR, { recursive: true });
+    accountsWatcher = fs.watch(ACCOUNTS_DIR, (eventType, filename) => {
+      if (filename && filename !== 'accounts.json') return;
+      // Debounced: a single save can emit several events, and our own writes land here too.
+      clearTimeout(accountsReloadTimer);
+      accountsReloadTimer = setTimeout(() => {
+        loadAccounts();
+        refreshAccountPresentation();
+      }, 150);
+    });
+  } catch (e) {
+    accountsWatcher = null; // no inotify (or no directory) — changes land at next launch
+  }
+}
+
+function accountConfig(n) {
+  return accounts.get(n) || { name: '', chromeProfile: PROFILE_AUTO, email: '' };
+}
+
+// Chrome records every profile — its directory, its display name and the address it is
+// signed into — in Local State. That is the whole reason auto-detection can work without
+// the user mapping anything by hand. Cached on mtime: it is re-read when Chrome actually
+// changes it (profile added/renamed), not on every link click.
+const CHROME_STATE_FILES = IS_MAC
+  ? [path.join(app.getPath('home'), 'Library/Application Support/Google/Chrome/Local State')]
+  : [
+    path.join(app.getPath('home'), '.config/google-chrome/Local State'),
+    path.join(app.getPath('home'), '.var/app/com.google.Chrome/config/google-chrome/Local State'),
+    path.join(app.getPath('home'), '.config/chromium/Local State'),
+  ];
+
+let profileCache = { key: null, list: [] };
+
+function chromeProfiles() {
+  for (const file of CHROME_STATE_FILES) {
+    let stat;
+    try { stat = fs.statSync(file); } catch { continue; }
+    const key = file + ':' + stat.mtimeMs;
+    if (profileCache.key === key) return profileCache.list;
+    try {
+      const cache = JSON.parse(fs.readFileSync(file, 'utf8')).profile.info_cache || {};
+      const list = Object.entries(cache).map(([dir, info]) => ({
+        dir,
+        name: (info && info.name) || dir,
+        email: (info && info.user_name) || '',
+      }));
+      // 'Default' is Chrome's first profile and has no number to sort by; keep it first.
+      list.sort((a, b) => (a.dir === 'Default' ? -1 : b.dir === 'Default' ? 1 : a.name.localeCompare(b.name)));
+      profileCache = { key, list };
+      return list;
+    } catch {
+      continue; // unreadable or unexpected shape — try the next candidate
+    }
+  }
+  return [];
+}
+
+function profileByDir(dir) {
+  return dir ? chromeProfiles().find((p) => p.dir === dir) || null : null;
+}
+
+// The Chrome profile a slot's links should open in, or null for "let Chrome decide".
+function profileForSlot(n) {
+  const cfg = accountConfig(n);
+  if (cfg.chromeProfile === PROFILE_NONE) return null;
+  if (cfg.chromeProfile && cfg.chromeProfile !== PROFILE_AUTO) {
+    // An explicitly chosen profile that Chrome no longer has would silently send links to a
+    // profile Chrome then invents. Fall back to auto rather than routing somewhere wrong.
+    const pinned = profileByDir(cfg.chromeProfile);
+    if (pinned) return pinned;
+  }
+  if (!cfg.email) return null;
+  const want = cfg.email.toLowerCase();
+  return chromeProfiles().find((p) => p.email && p.email.toLowerCase() === want) || null;
+}
+
+// Slot label: an explicit name wins, then the mapped Chrome profile's name (which is the
+// point of the mapping — the two stay consistent without typing anything), then null,
+// meaning "leave the page-derived title alone".
+function accountLabel(n) {
+  const cfg = accountConfig(n);
+  if (cfg.name) return cfg.name;
+  const profile = profileForSlot(n);
+  return profile ? profile.name : null;
+}
+
+function accountMenuLabel(n) {
+  return accountLabel(n) || 'Account ' + n;
+}
+
+// Which slot a webContents belongs to. The partition is the reliable link: it is set on the
+// session before the window exists, and child windows opened from the account switcher
+// inherit it, so links clicked in those route to the same Chrome profile as their parent.
+function slotOf(wc) {
+  try {
+    const m = /^persist:account-(\d+)$/.exec((wc.session && wc.session.__partition) || '');
+    return m ? Number(m[1]) : null;
+  } catch {
+    return null;
+  }
+}
+
+// Read the signed-in address out of the account button Google renders on every one of these
+// apps. This is what makes auto-detection work, and it is cached in accounts.json so the
+// mapping is already known at the next launch, before any page has painted.
+const ACCOUNT_EMAIL_JS = `(function(){
+  var a=document.querySelector('[aria-label*="Google Account" i]');
+  var s=a?(a.getAttribute('aria-label')||''):(document.title||'');
+  var m=s.match(/[\\w.+-]+@[\\w.-]+\\.[A-Za-z]{2,}/);
+  return m?m[0]:'';
+})()`;
+
+function rememberAccountEmail(wc) {
+  const n = slotOf(wc);
+  if (!n) return;
+  wc.executeJavaScript(ACCOUNT_EMAIL_JS, true).then((email) => {
+    if (!email || accountConfig(n).email === email) return;
+    accounts.set(n, Object.assign(accountConfig(n), { email }));
+    persistSlots([n]);
+    // A newly detected address can change both the routing and the window title.
+    refreshAccountPresentation();
+  }).catch(() => { /* page not ready or no account button — try again on the next load */ });
+}
+
 app.setName(APP_NAME);
 // Must follow setName: the preference file lives under userData, which is named after the app.
+loadAccounts();
+watchAccountsFile();
 loadThemePreference();
 applyColorScheme();
 // Before app ready on purpose: GTK reads GTK_THEME once, when the toolkit initializes.
@@ -528,21 +804,42 @@ function resolveBrowser() {
 }
 const BROWSER_CMD = resolveBrowser();
 
-function openInChrome(url) {
+// --profile-directory is a Chromium switch. Handing it to a browser that doesn't understand
+// it (Firefox, or anything set via GOOGLE_APP_BROWSER) would at best be ignored and at worst
+// be treated as a URL, so it is only ever passed to a browser known to take it.
+const CHROMIUM_BROWSER_RE = /(^|[^a-z])(chrome|chromium|brave|msedge|microsoft-edge|vivaldi|opera)([^a-z]|$)/i;
+
+function browserTakesProfileFlag() {
+  return !!BROWSER_CMD && CHROMIUM_BROWSER_RE.test(path.basename(BROWSER_CMD));
+}
+
+// slot is the account window the link came from; its mapped Chrome profile decides where
+// the URL lands. Without one, the URL is handed over bare and Chrome uses its focused
+// window — the old behaviour, kept as the fallback rather than guessing.
+function openInChrome(url, slot) {
   if (!/^https?:\/\//i.test(url || '')) { if (url) shell.openExternal(url); return; }
+  const profile = slot ? profileForSlot(slot) : null;
   // macOS: resolve Chrome by bundle name, falling back to the default browser. `open`
   // exits as soon as it hands off, so its exit code is a safe success signal here.
   if (IS_MAC && !BROWSER_CMD) {
-    execFile('open', ['-a', 'Google Chrome', url], (err) => {
+    // -n plus --args is the only way to get a switch through `open`; without a profile
+    // there is nothing to pass, so the simpler form (which reuses a running Chrome) stands.
+    const args = profile
+      ? ['-na', 'Google Chrome', '--args', '--profile-directory=' + profile.dir, url]
+      : ['-a', 'Google Chrome', url];
+    execFile('open', args, (err) => {
       if (err) shell.openExternal(url);
     });
     return;
   }
   if (!BROWSER_CMD) { shell.openExternal(url); return; }
+  const args = (profile && browserTakesProfileFlag())
+    ? ['--profile-directory=' + profile.dir, url]
+    : [url];
   // Detached + unref'd so a browser we cold-start isn't tied to this app's lifetime
   // (quitting the app must not take the user's browser window down with it).
   try {
-    const child = spawn(BROWSER_CMD, [url], { detached: true, stdio: 'ignore' });
+    const child = spawn(BROWSER_CMD, args, { detached: true, stdio: 'ignore' });
     child.on('error', () => shell.openExternal(url));
     child.unref();
   } catch (e) {
@@ -562,11 +859,14 @@ function openInChrome(url) {
 // __partition (see openAccountWindow) so the allowed child stays in the same cookie jar.
 function attachExternalLinkRouting(wc) {
   wc.setWindowOpenHandler(({ url }) => {
+    // Resolved per click, not captured once: the slot's Chrome profile can change from the
+    // Accounts window while these handlers stay attached.
+    const slot = slotOf(wc);
     try {
       const u = new URL(url);
       // Gmail wraps links inside emails in a google.com/url?q=<target> redirector → Chrome.
       if (/(^|\.)google\.com$/.test(u.hostname) && u.pathname === '/url') {
-        openInChrome(u.searchParams.get('q') || u.searchParams.get('url') || url);
+        openInChrome(u.searchParams.get('q') || u.searchParams.get('url') || url, slot);
         return { action: 'deny' };
       }
       if (isGoogleHost(u.hostname) || isAuthHost(u.hostname)) {
@@ -577,7 +877,7 @@ function attachExternalLinkRouting(wc) {
         return { action: 'allow', overrideBrowserWindowOptions: { webPreferences } };
       }
     } catch (e) { /* fall through to Chrome */ }
-    openInChrome(url);
+    openInChrome(url, slot);
     return { action: 'deny' };
   });
 }
@@ -599,7 +899,7 @@ function openAccountWindow(n) {
   const win = new BrowserWindow(Object.assign({
     width: 1280,
     height: 860,
-    title: APP_NAME + ' — Account ' + n,
+    title: accountLabel(n) || APP_NAME + ' — Account ' + n,
     backgroundColor: windowBackground(),
     webPreferences: Object.assign({ partition }, STEALTH_WEBPREFS),
   }, APP_ICON ? { icon: APP_ICON } : {}));
@@ -624,11 +924,98 @@ function nextFreeSlot() {
   return 1;
 }
 
+// Re-apply names everywhere they show after anything that can change them: the settings
+// window saving, or an address being detected for the first time.
+function refreshAccountPresentation() {
+  for (const [n, win] of windows) {
+    if (!win || win.isDestroyed()) continue;
+    const label = accountLabel(n);
+    if (label) {
+      win.setTitle(label);
+    } else if (win.webContents && !win.webContents.isDestroyed()) {
+      // A name that was cleared hands the title back to the page.
+      win.webContents.executeJavaScript(ACCOUNT_TITLE_JS, true)
+        .then((l) => { if (!win.isDestroyed() && l) win.setTitle(l); })
+        .catch(() => { /* ignore */ });
+    }
+  }
+  buildMenu(); // the Accounts menu lists the same names
+}
+
+let accountsWindow = null;
+
+function openAccountsWindow() {
+  if (accountsWindow && !accountsWindow.isDestroyed()) {
+    accountsWindow.focus();
+    return accountsWindow;
+  }
+  accountsWindow = new BrowserWindow(Object.assign({
+    width: 660,
+    height: 480,
+    title: 'Accounts',
+    backgroundColor: windowBackground(),
+    // This is our own page, not Google's — so it gets the ordinary hardened defaults
+    // rather than the stealth preferences the account windows need.
+    webPreferences: {
+      preload: path.join(__dirname, 'accounts-preload.js'),
+      contextIsolation: true,
+      sandbox: true,
+      nodeIntegration: false,
+    },
+  }, APP_ICON ? { icon: APP_ICON } : {}));
+  accountsWindow.setMenuBarVisibility(false);
+  accountsWindow.loadFile(path.join(__dirname, 'accounts.html'));
+  accountsWindow.on('closed', () => { accountsWindow = null; });
+  return accountsWindow;
+}
+
+ipcMain.handle('accounts:load', () => ({
+  slots: Array.from({ length: ACCOUNT_SLOTS }, (unused, i) => {
+    const n = i + 1;
+    const cfg = accountConfig(n);
+    const resolved = profileForSlot(n);
+    return {
+      n,
+      name: cfg.name || '',
+      chromeProfile: cfg.chromeProfile || PROFILE_AUTO,
+      email: cfg.email || '',
+      resolvedProfile: resolved ? resolved.name : '',
+    };
+  }),
+  profiles: chromeProfiles(),
+}));
+
+ipcMain.handle('accounts:save', (event, incoming) => {
+  if (!Array.isArray(incoming)) return false;
+  // Validate rather than trust: an ipcMain handler is reachable from any renderer, and a
+  // profile directory that Chrome doesn't have would send links into a profile it invents.
+  const known = new Set(chromeProfiles().map((p) => p.dir));
+  const touched = [];
+  for (const row of incoming) {
+    const n = Number(row && row.n);
+    if (!Number.isInteger(n) || n < 1 || n > ACCOUNT_SLOTS) continue;
+    touched.push(n);
+    let profile = typeof row.chromeProfile === 'string' ? row.chromeProfile : PROFILE_AUTO;
+    if (profile !== PROFILE_AUTO && profile !== PROFILE_NONE && !known.has(profile)) profile = PROFILE_AUTO;
+    const name = typeof row.name === 'string' ? row.name.trim().slice(0, 64) : '';
+    // The detected address is ours, not the renderer's — keep whatever we already learned.
+    accounts.set(n, Object.assign(accountConfig(n), { name, chromeProfile: profile }));
+  }
+  persistSlots(touched);
+  refreshAccountPresentation();
+  return true;
+});
+
+ipcMain.on('accounts:close', (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (win && !win.isDestroyed()) win.close();
+});
+
 function buildMenu() {
   const accountItems = [];
-  for (let i = 1; i <= 6; i++) {
+  for (let i = 1; i <= ACCOUNT_SLOTS; i++) {
     accountItems.push({
-      label: 'Account ' + i,
+      label: accountMenuLabel(i),
       accelerator: 'CmdOrCtrl+' + i,
       click: () => openAccountWindow(i),
     });
@@ -672,6 +1059,12 @@ function buildMenu() {
         },
         { type: 'separator' },
         ...accountItems,
+        { type: 'separator' },
+        {
+          label: 'Configure Accounts…',
+          accelerator: 'CmdOrCtrl+,',
+          click: () => openAccountsWindow(),
+        },
       ],
     },
     {
