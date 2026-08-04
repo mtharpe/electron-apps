@@ -7,7 +7,7 @@
   "description": "Standalone Google web app with per-window account isolation",
   "license": "MIT",
   "devDependencies": {
-    "@electron/packager": "^20.0.1",
-    "electron": "^42.4.0"
+    "@electron/packager": "^20.1.1",
+    "electron": "^42.8.0"
   }
 }
