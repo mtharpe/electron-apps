@@ -1,7 +1,7 @@
-const { app, BrowserWindow, Menu, session, shell, Notification, ipcMain, powerMonitor } = require('electron');
+const { app, BrowserWindow, Menu, session, shell, Notification, ipcMain, powerMonitor, nativeTheme } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const { execFile, spawn } = require('child_process');
+const { execFile, execFileSync, spawn } = require('child_process');
 
 const cfg = JSON.parse(fs.readFileSync(path.join(__dirname, 'app-config.json'), 'utf8'));
 const APP_NAME = cfg.name;
@@ -116,6 +116,56 @@ const STEALTH_WEBPREFS = {
   spellcheck: true,
   backgroundThrottling: false, // keep this window's timers/connection live in the background
 };
+
+// Electron does not pick up the desktop's dark preference on Linux: on a GNOME 50
+// session with gtk-theme=Adwaita-dark, gtk-application-prefer-dark-theme=1 AND the
+// portal reporting color-scheme=1, Electron 42 still reports
+// nativeTheme.shouldUseDarkColors === false under every ozone platform (wayland,
+// x11, default). Left alone that means a light window frame and a white flash on
+// open, regardless of how the desktop is themed.
+//
+// So resolve the preference ourselves from the freedesktop appearance portal — the
+// same source GNOME's own settings feed — and set themeSource explicitly. Reading
+// it rather than hardcoding 'dark' keeps the app following the desktop if it
+// switches to light. gdbus is used instead of a D-Bus module to avoid adding a
+// runtime dependency to a package that otherwise has none.
+//
+//   org.freedesktop.appearance color-scheme: 0 = no preference, 1 = dark, 2 = light
+const COLOR_SCHEME_DARK = 1;
+const COLOR_SCHEME_LIGHT = 2;
+
+function portalColorScheme() {
+  if (IS_MAC || process.platform === 'win32') return null;
+  try {
+    const out = execFileSync('gdbus', [
+      'call', '--session',
+      '--dest', 'org.freedesktop.portal.Desktop',
+      '--object-path', '/org/freedesktop/portal/desktop',
+      '--method', 'org.freedesktop.portal.Settings.ReadOne',
+      'org.freedesktop.appearance', 'color-scheme',
+    ], { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] });
+    const m = out.match(/uint32\s+(\d+)/);
+    return m ? Number(m[1]) : null;
+  } catch {
+    return null; // no portal, no gdbus, or the call timed out
+  }
+}
+
+function applyColorScheme() {
+  const scheme = portalColorScheme();
+  // Unreadable portal or "no preference" both fall back to the desktop-wide
+  // setting Electron *did* manage to read, rather than forcing a choice.
+  if (scheme === COLOR_SCHEME_DARK) nativeTheme.themeSource = 'dark';
+  else if (scheme === COLOR_SCHEME_LIGHT) nativeTheme.themeSource = 'light';
+}
+
+applyColorScheme();
+
+// Window background must match, or every window opens as a white rectangle before
+// the page paints — the most visible part of the problem on a dark desktop.
+function windowBackground() {
+  return nativeTheme.shouldUseDarkColors ? '#202124' : '#ffffff';
+}
 
 app.setName(APP_NAME);
 app.userAgentFallback = CHROME_UA;
@@ -390,7 +440,7 @@ function openAccountWindow(n) {
     width: 1280,
     height: 860,
     title: APP_NAME + ' — Account ' + n,
-    backgroundColor: '#ffffff',
+    backgroundColor: windowBackground(),
     webPreferences: Object.assign({ partition }, STEALTH_WEBPREFS),
   }, APP_ICON ? { icon: APP_ICON } : {}));
 
