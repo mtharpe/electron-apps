@@ -48,7 +48,11 @@ notification banners** (not just a sound).
 - **All profiles stay live** — background account windows aren't throttled or suspended,
   so every open profile keeps refreshing (Calendar data) and firing notifications, not
   just the focused one. Windows also reload on wake-from-sleep to recover stale sessions.
-- **Dark window chrome** — window decorations follow the system light/dark setting.
+- **Light/dark window chrome** — the titlebar, the page and the pre-paint background all
+  follow the system light/dark setting, and **View ▸ Appearance** pins **Light** or **Dark**
+  when detection gets it wrong. The choice is saved per app and survives restarts; **System**
+  (the default) tracks the desktop live. Changing it offers a restart, because GTK only reads
+  the theme at startup and the titlebar can't be repainted in place.
 - **Maximized on launch** — every account window opens maximized.
 - **One instance per app** — launching a second copy focuses the running one instead of
   starting a rival process fighting over the same session data.
