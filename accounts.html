@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+<title>Accounts</title>
+<style>
+  /* prefers-color-scheme tracks nativeTheme.themeSource, which main.js resolves from the
+     desktop (or the View ▸ Appearance override), so this window follows the same choice. */
+  :root {
+    color-scheme: light dark;
+    --fg: #1f1f1f;
+    --muted: #5f6368;
+    --bg: #ffffff;
+    --field-bg: #ffffff;
+    --border: #c4c7c5;
+    --accent: #0b57d0;
+    --accent-fg: #ffffff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --fg: #e3e3e3;
+      --muted: #9aa0a6;
+      --bg: #202124;
+      --field-bg: #2d2f31;
+      --border: #5f6368;
+      --accent: #a8c7fa;
+      --accent-fg: #062e6f;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 20px 22px 16px;
+    background: var(--bg);
+    color: var(--fg);
+    font: 13px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, Cantarell, sans-serif;
+  }
+  h1 { font-size: 15px; font-weight: 600; margin: 0 0 4px; }
+  p.intro { margin: 0 0 16px; color: var(--muted); }
+  table { width: 100%; border-collapse: collapse; }
+  th {
+    text-align: left; font-size: 11px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: .04em; color: var(--muted); padding: 0 8px 6px 0;
+  }
+  th.slot, td.slot { width: 34px; color: var(--muted); }
+  td { padding: 3px 8px 3px 0; vertical-align: middle; }
+  input, select {
+    width: 100%; padding: 5px 7px; color: var(--fg); background: var(--field-bg);
+    border: 1px solid var(--border); border-radius: 6px; font: inherit;
+  }
+  input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  input::placeholder { color: var(--muted); }
+  td.detected { width: 34%; color: var(--muted); font-size: 12px; white-space: nowrap;
+                overflow: hidden; text-overflow: ellipsis; }
+  footer { display: flex; align-items: center; gap: 8px; margin-top: 18px; }
+  .note { flex: 1; color: var(--muted); font-size: 12px; }
+  button {
+    padding: 6px 16px; border-radius: 999px; border: 1px solid var(--border);
+    background: transparent; color: var(--fg); font: inherit; cursor: pointer;
+  }
+  button.primary { background: var(--accent); color: var(--accent-fg); border-color: transparent; }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+</style>
+</head>
+<body>
+  <h1>Accounts</h1>
+  <p class="intro">
+    Links clicked in an account window open in its Chrome profile. Leave a name blank to use
+    the Chrome profile's own name.
+  </p>
+
+  <table>
+    <thead>
+      <tr>
+        <th class="slot">#</th>
+        <th>Name</th>
+        <th>Chrome profile</th>
+        <th>Signed in as</th>
+      </tr>
+    </thead>
+    <tbody id="rows"></tbody>
+  </table>
+
+  <footer>
+    <span class="note" id="note"></span>
+    <button id="cancel">Cancel</button>
+    <button id="save" class="primary">Save</button>
+  </footer>
+
+<script>
+  const AUTO = 'auto';
+  const NONE = 'none';
+  let slots = [];
+
+  // Every cell is built with textContent / option.text rather than innerHTML: names and
+  // addresses come from Chrome's Local State and from Google pages, i.e. not from us.
+  function render(data) {
+    slots = data.slots;
+    const tbody = document.getElementById('rows');
+    tbody.textContent = '';
+
+    for (const slot of slots) {
+      const tr = document.createElement('tr');
+
+      const num = document.createElement('td');
+      num.className = 'slot';
+      num.textContent = slot.n;
+      tr.appendChild(num);
+
+      const nameCell = document.createElement('td');
+      const name = document.createElement('input');
+      name.type = 'text';
+      name.value = slot.name;
+      name.dataset.slot = slot.n;
+      name.className = 'name';
+      // The placeholder shows what the title falls back to, so a blank field is not a blank
+      // window title — it is "whatever the mapped profile is called".
+      name.placeholder = slot.resolvedProfile || ('Account ' + slot.n);
+      nameCell.appendChild(name);
+      tr.appendChild(nameCell);
+
+      const profileCell = document.createElement('td');
+      const select = document.createElement('select');
+      select.dataset.slot = slot.n;
+      select.className = 'profile';
+      const auto = new Option('Auto (detect)', AUTO);
+      select.add(auto);
+      for (const p of data.profiles) {
+        select.add(new Option(p.email ? p.name + ' — ' + p.email : p.name, p.dir));
+      }
+      select.add(new Option('None (focused window)', NONE));
+      select.value = slot.chromeProfile;
+      // A profile that has since been deleted in Chrome falls back to Auto, matching how
+      // the main process resolves it.
+      if (!select.value) select.value = AUTO;
+      profileCell.appendChild(select);
+      tr.appendChild(profileCell);
+
+      const detected = document.createElement('td');
+      detected.className = 'detected';
+      detected.textContent = slot.email || '—';
+      detected.title = slot.email
+        ? (slot.resolvedProfile ? 'Auto-detects: ' + slot.resolvedProfile : 'No Chrome profile signed into this address')
+        : 'Detected once this account window has loaded';
+      tr.appendChild(detected);
+
+      tbody.appendChild(tr);
+    }
+
+    document.getElementById('note').textContent = data.profiles.length
+      ? ''
+      : 'No Chrome profiles found — links will open in the focused window.';
+  }
+
+  function collect() {
+    return slots.map((slot) => ({
+      n: slot.n,
+      name: document.querySelector('input.name[data-slot="' + slot.n + '"]').value,
+      chromeProfile: document.querySelector('select.profile[data-slot="' + slot.n + '"]').value,
+    }));
+  }
+
+  document.getElementById('save').addEventListener('click', async () => {
+    await window.accountsApi.save(collect());
+    window.accountsApi.close();
+  });
+  document.getElementById('cancel').addEventListener('click', () => window.accountsApi.close());
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') window.accountsApi.close();
+  });
+
+  window.accountsApi.load().then(render);
+</script>
+</body>
+</html>
