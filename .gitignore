@@ -3,9 +3,11 @@ node_modules/
 build/
 out/
 *-darwin-*/
+*-linux-*/
 
 # Generated at build time per service
 app-config.json
+app-icon.png
 .notif-registered
 
 # Logs & OS cruft
