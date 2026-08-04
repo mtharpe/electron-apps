@@ -41,6 +41,11 @@ notification banners** (not just a sound).
 - **Links open in your browser** — links that leave Google (in emails, Calendar events, …)
   open in Chrome / your default browser, from **every** window — including secondary account
   windows opened by the account switcher.
+- **Links land in the right Chrome profile** — each account window can be pinned to a Chrome
+  profile, so a link from your work account opens in your work profile instead of whichever
+  Chrome window happened to have focus. Accounts match themselves to the profile signed into
+  the same Google address, and **Accounts → Configure Accounts…** lets you rename accounts
+  and override the mapping.
 - **Native desktop notifications** — Calendar reminders / new-mail alerts show as real
   banners (Notification Center on macOS; your desktop's notification daemon on Linux,
   correctly attributed to the app with its own icon). See
@@ -157,6 +162,7 @@ ARCH=arm64 ./build-linux.sh      # defaults to the host architecture
 |---|---|
 | `⌘/Ctrl + N` | New isolated account window |
 | `⌘/Ctrl + 1`–`6` | Open/focus Account 1–6 |
+| `⌘/Ctrl + ,` | Configure accounts (names + Chrome profiles) |
 | `⌘/Ctrl + R` / `⇧ + …R` | Reload / force reload |
 | `⌘/Ctrl + +` / `-` / `0` | Zoom in / out / reset |
 | `⌥⌘I` / `Ctrl+Shift+I` | Toggle DevTools |
@@ -172,6 +178,8 @@ built with [`@electron/packager`](https://github.com/electron/packager).
 |---|---|
 | `main.js` | Main process: per-account isolated windows, menus, request-header spoofing, permission grants, the **notification mirror** IPC handler, **external-link routing** (every window), **enterprise-SSO routing**, **per-account window titles**, the **Gmail view normalizer**, maximize-on-start, single-instance lock. Platform differences (UA, menus, link opening, icons) branch on `IS_MAC`. |
 | `preload.js` | Runs in the page's main world; the **stealth layer** + the client-side **notification mirror**. |
+| `accounts.html` | The **Configure Accounts…** window: a name field and a Chrome profile dropdown per account slot. |
+| `accounts-preload.js` | Context-isolated bridge for that window — exposes load / save / close and nothing else. |
 | `services.conf` | The service list (`name \| icon \| url \| bundle-id \| categories`), shared by both build scripts so they can't drift. |
 | `build.sh` | macOS: builds/installs/signs all four. Builds for the host arch (or `ARCH=universal`). On Linux it hands off to `build-linux.sh`. |
 | `build-linux.sh` | Linux: packages each service, installs under `$PREFIX`, writes `.desktop` files and the icon ladder, registers with the desktop. Also `--uninstall`. |
@@ -261,6 +269,48 @@ friends, and falls back to `xdg-open` (your actual default browser) if none are 
 **`GOOGLE_APP_BROWSER`** to a command or absolute path to override the probe on either
 platform.
 
+### Chrome profile routing
+`google-chrome <url>` drops the link into whichever profile window Chrome currently has
+focused, which is rarely the one the link belongs to. Chrome takes `--profile-directory=<dir>`
+to pick the target explicitly, so each account slot can be pinned to one.
+
+The mapping is keyed by **slot number**, not by email: the slot owns the cookie jar
+(`persist:account-N`), it exists before any page has loaded, and it survives a window being
+signed into a different account. The originating slot is recovered from the session partition
+at click time, so links clicked in the secondary windows the account switcher opens route to
+the same profile as their parent.
+
+Unmapped slots (**Auto**) match themselves: Chrome records every profile's directory, display
+name and signed-in address in `Local State`, and the app reads the signed-in address out of
+each account window's Google Account button. Same address → that profile. The detected address
+is cached in `accounts.json`, so the mapping is already known at the next launch, before any
+page has painted. A slot pinned to a profile that Chrome no longer has falls back to auto
+rather than routing to a profile Chrome would then invent, and **None** hands the URL over
+bare (the old focused-window behaviour). The flag is only ever passed to a Chromium-family
+browser — Firefox would treat it as a URL.
+
+### Renaming accounts
+**Accounts → Configure Accounts…** (`Ctrl+,` / `⌘,`) opens a window with a name field and a
+Chrome profile dropdown per slot. A name set here
+outranks the page-derived title below. Leave it blank and a mapped slot takes its Chrome
+profile's own name, which is the point of the mapping — the two stay consistent without
+typing anything.
+
+Names and mappings are **shared by all four apps** (`~/.config/google-standalone-apps/accounts.json`,
+or `~/Library/Application Support/google-standalone-apps/` on macOS) — "Account 2 is Work" is
+a fact about your Google accounts, not about Gmail-the-app, so you name them once. Only the
+labels and the routing are shared; the sessions stay isolated per app exactly as before. Each
+app watches the file, so a name set in Gmail reaches a running Calendar without restarting it,
+and saves write only the slots that changed so one app can't revert another's edit. An older
+per-app `<userData>/accounts.json` is merged in on first run (anything already in the shared
+file wins) and renamed to `accounts.json.migrated`.
+
+Unlike the account windows, this window is an ordinary hardened renderer
+(`contextIsolation: true`, `sandbox: true`) with its own preload exposing exactly three
+calls — the stealth preferences exist for Google's sign-in gate and have no business here.
+Saved values are validated in the main process rather than trusted, since `ipcMain` handlers
+are reachable from any renderer.
+
 ### Desktop integration on Linux
 Each service is installed under its own **slug** (`gmail`, `google-calendar`, …), and that
 one string is used as the executable name, the launcher symlink, the `.desktop` **filename**,
@@ -277,7 +327,8 @@ the icon name and the window's `WM_CLASS` — so they all line up by constructio
   desktop's notification settings.
 
 ### Per-account window titles
-A global `web-contents-created` hook titles each window with just the account/org name and
+A name set in **Configure Accounts…** (or inherited from the mapped Chrome profile) wins.
+With neither, a global `web-contents-created` hook titles each window with the account/org name and
 re-applies it on every load (suppressing Google's own long page title). Gmail & Calendar
 expose the org name in their page title (*Spectro Cloud*, *Google Calendar*, …); **Keep**
 has no org name in its title so it falls back to the signed-in **email**; **Tasks** stays
