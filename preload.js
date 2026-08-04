@@ -9,6 +9,20 @@
   // before the Node-global scrub in step 4 below.
   const V = (((typeof process !== 'undefined') && process.versions && process.versions.chrome) || '148.0.0.0').split('.')[0];
 
+  // Spoof the HOST platform. These values must agree with the User-Agent and
+  // Sec-CH-UA-Platform headers main.js sends — a client claiming macOS in JS while its
+  // headers (and GPU/font fingerprint) say Linux is self-contradictory, and inconsistency
+  // is exactly what Google's "browser may not be secure" check hunts for.
+  const PLAT = ((typeof process !== 'undefined') && process.platform) || 'darwin';
+  const IS_MAC = PLAT === 'darwin';
+  const ARCH = ((typeof process !== 'undefined') && process.arch) || 'arm64';
+  // Client Hints spell architectures "x86"/"arm", not Node's "x64"/"arm64".
+  const CH_ARCH = /^arm/.test(ARCH) ? 'arm' : 'x86';
+  const CH_PLATFORM = IS_MAC ? 'macOS' : 'Linux';
+  // Chrome reports a real macOS version here, but reports "" on Linux — matching that
+  // matters more than supplying a plausible-looking kernel version.
+  const CH_PLATFORM_VERSION = IS_MAC ? '14.4.1' : '';
+
   const def = (obj, prop, getter) => {
     try { Object.defineProperty(obj, prop, { get: getter, configurable: true }); } catch (e) {}
   };
@@ -32,23 +46,28 @@
     const uaData = {
       brands,
       mobile: false,
-      platform: 'macOS',
+      platform: CH_PLATFORM,
       getHighEntropyValues: () => Promise.resolve({
-        architecture: 'arm',
+        architecture: CH_ARCH,
         bitness: '64',
         brands,
         fullVersionList,
         mobile: false,
         model: '',
-        platform: 'macOS',
-        platformVersion: '14.4.1',
+        platform: CH_PLATFORM,
+        platformVersion: CH_PLATFORM_VERSION,
         uaFullVersion: V + '.0.0.0',
         wow64: false,
       }),
-      toJSON: () => ({ brands, mobile: false, platform: 'macOS' }),
+      toJSON: () => ({ brands, mobile: false, platform: CH_PLATFORM }),
     };
     def(navigator, 'userAgentData', () => uaData);
   } catch (e) {}
+
+  // 2b) navigator.platform — the legacy sibling of the above. Chrome reports "MacIntel" on
+  // macOS and "Linux x86_64" on Linux; Electron already reports the host value correctly,
+  // so this only pins it against anything that might overwrite it later.
+  try { def(navigator, 'platform', () => (IS_MAC ? 'MacIntel' : 'Linux ' + (CH_ARCH === 'arm' ? 'aarch64' : 'x86_64'))); } catch (e) {}
 
   // 3) window.chrome — real Chrome exposes a rich object; Electron's is sparse/absent.
   try {
@@ -112,7 +131,12 @@
 
     // 7a) page-level Notification — wrap construction via a Proxy; the returned object is
     //     still a genuine Notification.
-    if (window.Notification) {
+    //
+    //     macOS ONLY. Electron delivers plain page-level notifications to the Linux
+    //     desktop by itself, so mirroring them there would post a second, identical
+    //     banner for every single reminder. (Persistent notifications are the opposite
+    //     case — Electron never shows those on Linux — so 7b below stays on everywhere.)
+    if (window.Notification && IS_MAC) {
       window.Notification = new Proxy(window.Notification, {
         construct(target, argList) {
           try { fire(argList[0], argList[1]); } catch (e) {}

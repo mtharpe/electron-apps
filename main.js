@@ -1,11 +1,35 @@
 const { app, BrowserWindow, Menu, session, shell, Notification, ipcMain, powerMonitor } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const { execFile } = require('child_process');
+const { execFile, spawn } = require('child_process');
 
 const cfg = JSON.parse(fs.readFileSync(path.join(__dirname, 'app-config.json'), 'utf8'));
 const APP_NAME = cfg.name;
 const APP_URL = cfg.url;
+
+const IS_MAC = process.platform === 'darwin';
+
+// Linux has no per-app icon baked into the executable the way a macOS .app carries its
+// .icns, so the Linux build ships a PNG we hand to every window (taskbar/alt-tab identity)
+// and to native notifications. Absent on macOS — where the bundle icon already covers
+// both — so this is null there and every use site is a no-op.
+//
+// It lives in resources/ NEXT TO the asar rather than inside it: the notification icon is
+// handed to the desktop's notification daemon as a plain filesystem path, and a separate
+// process cannot read a path inside an asar archive (Electron's asar support is a patch
+// over ITS OWN fs, not a real mount). resourcesPath covers the packaged app; __dirname
+// covers running unpackaged from a checkout.
+const APP_ICON = (() => {
+  if (IS_MAC) return null;
+  const candidates = [
+    path.join(process.resourcesPath || '', 'app-icon.png'),
+    path.join(__dirname, 'app-icon.png'),
+  ];
+  for (const p of candidates) {
+    try { if (p && fs.existsSync(p)) return p; } catch (e) { /* try next */ }
+  }
+  return null;
+})();
 
 // Normalize Workspace Gmail to match personal Gmail by hiding the left Mail/Chat/Meet/Spaces
 // "app-rail" that Workspace accounts show (personal accounts don't). Anchored on the buttons'
@@ -66,12 +90,18 @@ app.on('web-contents-created', (e, wc) => {
 // major makes Google reject the app (Calendar then shows "could not load the data"). Paired
 // with preload.js (which fixes the JS-side fingerprints), this is what gets past Google's
 // "browser may not be secure" gate.
+// Spoof the HOST platform, not a fixed one: claiming macOS while running on Linux would
+// contradict every other signal Google sees (Sec-CH-UA-Platform, navigator.platform, the
+// GPU/font fingerprint), and a self-inconsistent client is exactly what the "browser may
+// not be secure" check looks for. preload.js derives the same values from process.platform.
 const CHROME_MAJOR = process.versions.chrome.split('.')[0];
+const UA_OS = IS_MAC ? 'Macintosh; Intel Mac OS X 10_15_7' : 'X11; Linux x86_64';
 const CHROME_UA =
-  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 ' +
+  'Mozilla/5.0 (' + UA_OS + ') AppleWebKit/537.36 ' +
   '(KHTML, like Gecko) Chrome/' + CHROME_MAJOR + '.0.0.0 Safari/537.36';
 const SEC_CH_UA =
   '"Google Chrome";v="' + CHROME_MAJOR + '", "Chromium";v="' + CHROME_MAJOR + '", "Not.A/Brand";v="24"';
+const SEC_CH_UA_PLATFORM = IS_MAC ? '"macOS"' : '"Linux"';
 
 const STEALTH_WEBPREFS = {
   preload: path.join(__dirname, 'preload.js'),
@@ -109,13 +139,14 @@ function spoofSession(sess) {
     h['User-Agent'] = CHROME_UA;
     h['sec-ch-ua'] = SEC_CH_UA;
     h['sec-ch-ua-mobile'] = '?0';
-    h['sec-ch-ua-platform'] = '"macOS"';
+    h['sec-ch-ua-platform'] = SEC_CH_UA_PLATFORM;
     delete h['X-Requested-With'];
     cb({ requestHeaders: h });
   });
 
   // Grant the web permissions Google services need — most importantly notifications,
-  // which Electron then forwards to the native macOS Notification Center.
+  // which Electron then forwards to the OS notification service (macOS Notification
+  // Center; libnotify / the desktop's notification daemon on Linux).
   const GRANTED = new Set([
     'notifications', 'media', 'mediaKeySystem', 'fullscreen', 'pointerLock',
     'clipboard-read', 'clipboard-sanitized-write', 'background-sync',
@@ -128,26 +159,63 @@ function spoofSession(sess) {
 // acctNum -> BrowserWindow
 const windows = new Map();
 
-// Web/service-worker notifications from the renderer (Google Calendar reminders, new
-// Gmail, etc.) are mirrored here and shown via the native main-process Notification —
-// the path that reliably renders macOS banners. Clicking one focuses the window.
-ipcMain.on('mirror-notification', (event, n) => {
+// Build a native notification. On Linux the banner has no bundle to inherit an icon from,
+// so the app PNG is attached explicitly; on macOS the .app icon is used automatically and
+// APP_ICON is null, leaving the options untouched.
+function nativeNotification(opts) {
+  return new Notification(APP_ICON ? Object.assign({ icon: APP_ICON }, opts) : opts);
+}
+
+// Show one mirrored notification. `focus` is called when the user clicks the banner.
+function showMirroredNotification(n, focus) {
   if (!Notification.isSupported()) return;
-  const native = new Notification({
+  const native = nativeNotification({
     title: (n && n.title) ? n.title : APP_NAME,
     body: (n && n.body) ? n.body : '',
   });
-  native.on('click', () => {
-    const win = BrowserWindow.fromWebContents(event.sender);
-    if (win) {
-      if (win.isMinimized()) win.restore();
-      win.show();
-      win.focus();
-    }
+  if (focus) native.on('click', focus);
+  native.show();
+}
+
+function focusWindow(win) {
+  if (!win || win.isDestroyed()) return;
+  if (win.isMinimized()) win.restore();
+  win.show();
+  win.focus();
+}
+
+// Web notifications from the PAGE (Google Calendar reminders, new Gmail, etc.) are
+// mirrored here and shown via the native main-process Notification. Clicking one focuses
+// the window.
+//
+// Which notifications get mirrored is platform-specific. Measured on Linux (Electron 42)
+// by watching the desktop's notification bus while firing each kind:
+//
+//   page-level `new Notification(...)`         -> Electron delivers it natively
+//   page-called registration.showNotification  -> never delivered; needs this mirror
+//   showNotification() from INSIDE a worker    -> never delivered; see the note below
+//
+// So on Linux the page-level path must NOT be mirrored: Electron already shows it, and
+// mirroring it too made every reminder appear as two identical banners. macOS keeps its
+// existing, field-tested behaviour of mirroring it. That half of the policy is enforced in
+// preload.js, where the hook lives.
+ipcMain.on('mirror-notification', (event, n) => {
+  showMirroredNotification(n, () => {
+    focusWindow(BrowserWindow.fromWebContents(event.sender));
     try { event.sender.send('mirror-notification-click', n && n.id); } catch (e) {}
   });
-  native.show();
 });
+
+// KNOWN LIMITATION, Linux: a notification posted from INSIDE a service worker's own scope
+// never reaches the desktop. Electron does not display persistent notifications on Linux,
+// showNotification() resolves successfully and nothing appears, and the worker's scope
+// cannot be patched from here — Electron's service-worker preload scripts run in a
+// separate realm, so a hook installed there does not affect the worker's own calls
+// (measured: the worker still sees the original showNotification).
+//
+// In practice Google Calendar reminders are unaffected: Calendar's web notifications
+// require an open Calendar view and are posted from the PAGE, which the two mirrors above
+// do cover. This only bites a notification pushed to a worker with no page driving it.
 
 // True if `host` equals or is a subdomain of any suffix in the list. Suffix-matched rather
 // than regex'd, so lookalikes like "google.com.evil.com" / "google.evil.com" don't match.
@@ -215,13 +283,61 @@ function isAuthHost(host) {
   return hasSuffix(host, IDP_HOST_SUFFIXES) || hasSuffix(host, EXTRA_AUTH_SUFFIXES);
 }
 
-// Open external links (e.g. links inside emails) in the user's Chrome browser,
-// falling back to the system default browser if Chrome isn't installed.
+// Open external links (e.g. links inside emails) in the user's Chrome browser, falling
+// back to the system default browser if Chrome isn't installed.
+//
+// macOS resolves "Google Chrome" by bundle name via `open -a`; Linux has no such lookup,
+// so we probe PATH for the usual Chrome/Chromium executables ourselves. Either way the
+// last resort is shell.openExternal (LaunchServices / xdg-open), which honours whatever
+// the user actually set as their default browser. GOOGLE_APP_BROWSER overrides the probe
+// with an explicit command for anyone who wants a different browser (or a flatpak wrapper).
+const LINUX_BROWSERS = [
+  'google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser',
+  'brave-browser', 'microsoft-edge',
+];
+
+// Resolve the browser command ONCE, by looking for an executable on PATH — deliberately
+// not by spawning and watching the exit code. A browser launched into a fresh instance
+// doesn't exit until the user quits it, so an exit-code fallback would sit armed for
+// hours and then re-open a long-forgotten link in a second browser.
+function resolveBrowser() {
+  const explicit = String(process.env.GOOGLE_APP_BROWSER || '').trim();
+  const names = explicit ? [explicit] : (IS_MAC ? [] : LINUX_BROWSERS);
+  const dirs = String(process.env.PATH || '').split(path.delimiter).filter(Boolean);
+  for (const name of names) {
+    // An absolute/relative path in GOOGLE_APP_BROWSER is used as given.
+    if (name.includes(path.sep)) {
+      try { fs.accessSync(name, fs.constants.X_OK); return name; } catch (e) { continue; }
+    }
+    for (const dir of dirs) {
+      const full = path.join(dir, name);
+      try { fs.accessSync(full, fs.constants.X_OK); return full; } catch (e) { /* keep looking */ }
+    }
+  }
+  return null;
+}
+const BROWSER_CMD = resolveBrowser();
+
 function openInChrome(url) {
   if (!/^https?:\/\//i.test(url || '')) { if (url) shell.openExternal(url); return; }
-  execFile('open', ['-a', 'Google Chrome', url], (err) => {
-    if (err) shell.openExternal(url);
-  });
+  // macOS: resolve Chrome by bundle name, falling back to the default browser. `open`
+  // exits as soon as it hands off, so its exit code is a safe success signal here.
+  if (IS_MAC && !BROWSER_CMD) {
+    execFile('open', ['-a', 'Google Chrome', url], (err) => {
+      if (err) shell.openExternal(url);
+    });
+    return;
+  }
+  if (!BROWSER_CMD) { shell.openExternal(url); return; }
+  // Detached + unref'd so a browser we cold-start isn't tied to this app's lifetime
+  // (quitting the app must not take the user's browser window down with it).
+  try {
+    const child = spawn(BROWSER_CMD, [url], { detached: true, stdio: 'ignore' });
+    child.on('error', () => shell.openExternal(url));
+    child.unref();
+  } catch (e) {
+    shell.openExternal(url);
+  }
 }
 
 // target=_blank / pop-outs: open links inside emails & calendar events (and any external link)
@@ -270,13 +386,13 @@ function openAccountWindow(n) {
   // any allowed child window (account switcher, SSO popup) in the same cookie jar.
   sess.__partition = partition;
 
-  const win = new BrowserWindow({
+  const win = new BrowserWindow(Object.assign({
     width: 1280,
     height: 860,
     title: APP_NAME + ' — Account ' + n,
     backgroundColor: '#ffffff',
     webPreferences: Object.assign({ partition }, STEALTH_WEBPREFS),
-  });
+  }, APP_ICON ? { icon: APP_ICON } : {}));
 
   win.webContents.setUserAgent(CHROME_UA);
 
@@ -308,8 +424,12 @@ function buildMenu() {
     });
   }
 
-  const template = [
-    {
+  // The leading menu differs by platform: macOS gets the standard application menu
+  // (About / Hide / Hide Others / Unhide are macOS-only roles and are ignored elsewhere),
+  // while Linux gets a conventional File menu — the menu bar is drawn inside the window
+  // there, so there is no app-name menu for those items to live in.
+  const leadingMenu = IS_MAC
+    ? {
       label: APP_NAME,
       submenu: [
         { role: 'about' },
@@ -320,7 +440,18 @@ function buildMenu() {
         { type: 'separator' },
         { role: 'quit' },
       ],
-    },
+    }
+    : {
+      label: 'File',
+      submenu: [
+        { role: 'close' },
+        { type: 'separator' },
+        { role: 'quit' },
+      ],
+    };
+
+  const template = [
+    leadingMenu,
     {
       label: 'Accounts',
       submenu: [
@@ -351,18 +482,21 @@ function buildMenu() {
     },
     {
       label: 'Window',
-      submenu: [
-        { role: 'minimize' }, { role: 'zoom' }, { role: 'close' }, { role: 'front' },
-      ],
+      // 'zoom' and 'front' are macOS-only roles.
+      submenu: IS_MAC
+        ? [{ role: 'minimize' }, { role: 'zoom' }, { role: 'close' }, { role: 'front' }]
+        : [{ role: 'minimize' }, { role: 'close' }],
     },
     {
       label: 'Help',
       submenu: [
+        // On macOS About lives in the application menu; on Linux it belongs here.
+        ...(IS_MAC ? [] : [{ role: 'about' }, { type: 'separator' }]),
         {
           label: 'Send Test Notification (now)',
           click: () => {
             if (Notification.isSupported()) {
-              new Notification({ title: APP_NAME, body: 'Native macOS notifications are working ✓' }).show();
+              nativeNotification({ title: APP_NAME, body: 'Native desktop notifications are working ✓' }).show();
             }
           },
         },
@@ -371,7 +505,7 @@ function buildMenu() {
           click: () => {
             if (!Notification.isSupported()) return;
             setTimeout(() => {
-              new Notification({
+              nativeNotification({
                 title: APP_NAME,
                 body: 'If you can see this banner, notifications work while ' + APP_NAME + ' is in the background ✓',
               }).show();
@@ -385,34 +519,65 @@ function buildMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
-app.whenReady().then(() => {
-  buildMenu();
-  openAccountWindow(1);
-
-  // On the very first launch, fire one native notification so macOS registers this
-  // app under System Settings → Notifications (apps only appear there once they notify).
-  try {
-    const marker = path.join(app.getPath('userData'), '.notif-registered');
-    if (!fs.existsSync(marker) && Notification.isSupported()) {
-      new Notification({ title: APP_NAME, body: APP_NAME + ' notifications are enabled.' }).show();
-      fs.writeFileSync(marker, '1');
-    }
-  } catch (e) { /* non-fatal */ }
-
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) openAccountWindow(1);
+// One process per app. macOS gives this for free (re-launching a .app just activates the
+// running copy), but on Linux every click in the app grid / every `gmail` from a shell
+// would otherwise start a SECOND process pointed at the same per-account partition dirs —
+// which Chromium's profile lock rejects, so the new copy comes up with broken storage.
+// Instead, hand the request to the running instance and let it surface a window.
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    const open = BrowserWindow.getAllWindows().filter((w) => !w.isDestroyed());
+    if (open.length === 0) { openAccountWindow(nextFreeSlot()); return; }
+    const win = open[0];
+    if (win.isMinimized()) win.restore();
+    win.show();
+    win.focus();
   });
 
-  // After the Mac wakes from sleep, a long-idle Google session can drop its live
-  // connection (Calendar then shows "could not load the data"). Reload every window so
-  // all open profiles refresh and resume firing notifications.
-  powerMonitor.on('resume', () => {
-    for (const win of BrowserWindow.getAllWindows()) {
-      if (!win.isDestroyed()) win.webContents.reload();
-    }
+  app.whenReady().then(() => {
+    // Populates the Help → About dialog. macOS fills this from the bundle's Info.plist,
+    // but on Linux the About panel is empty unless it's set explicitly.
+    app.setAboutPanelOptions(Object.assign({
+      applicationName: APP_NAME,
+      applicationVersion: app.getVersion(),
+      version: 'Electron ' + process.versions.electron + ' / Chromium ' + process.versions.chrome,
+      copyright: 'MIT — not affiliated with or endorsed by Google',
+    }, APP_ICON ? { iconPath: APP_ICON } : {}));
+
+    buildMenu();
+    openAccountWindow(1);
+
+    // On the very first launch, fire one native notification so the OS registers this app
+    // with its notification settings (macOS only lists apps under System Settings →
+    // Notifications once they've notified; GNOME likewise only shows a per-app entry after
+    // the first notification arrives).
+    try {
+      const marker = path.join(app.getPath('userData'), '.notif-registered');
+      if (!fs.existsSync(marker) && Notification.isSupported()) {
+        nativeNotification({ title: APP_NAME, body: APP_NAME + ' notifications are enabled.' }).show();
+        fs.writeFileSync(marker, '1');
+      }
+    } catch (e) { /* non-fatal */ }
+
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) openAccountWindow(1);
+    });
+
+    // After the machine wakes from sleep, a long-idle Google session can drop its live
+    // connection (Calendar then shows "could not load the data"). Reload every window so
+    // all open profiles refresh and resume firing notifications. Fires on macOS wake and
+    // on Linux via logind's PrepareForSleep signal.
+    powerMonitor.on('resume', () => {
+      for (const win of BrowserWindow.getAllWindows()) {
+        if (!win.isDestroyed()) win.webContents.reload();
+      }
+    });
   });
-});
+}
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit();
+  if (!IS_MAC) app.quit();
 });

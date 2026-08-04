@@ -6,17 +6,18 @@ set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$DIR"
 
+# This script builds macOS .app bundles. On Linux the packaging, install layout and
+# desktop integration are entirely different, so hand off to the Linux builder.
+if [ "$(uname -s)" != "Darwin" ]; then
+  exec "$DIR/build-linux.sh" "$@"
+fi
+
 # Build for the host architecture so the apps run natively on Apple Silicon (arm64)
 # or Intel (x86_64 -> x64). Override by exporting ARCH=universal for a fat binary.
 ARCH="${ARCH:-$([ "$(uname -m)" = "x86_64" ] && echo x64 || echo arm64)}"
 
-# service | icon-name | url | bundle-id
-SERVICES=(
-  "Gmail|gmail|https://mail.google.com/|com.miketharpe.gmailapp"
-  "Google Calendar|calendar|https://calendar.google.com/|com.miketharpe.calendarapp"
-  "Google Tasks|tasks|https://tasks.google.com/embed/?origin=https://calendar.google.com&fullWidth=1|com.miketharpe.tasksapp"
-  "Google Keep|keep|https://keep.google.com/|com.miketharpe.keepapp"
-)
+# service | icon-name | url | bundle-id | categories (categories are Linux-only, unused here)
+. "$DIR/services.conf"
 
 # Install build deps on first run (electron + packager are devDependencies).
 if [ ! -d node_modules ]; then
@@ -26,7 +27,7 @@ fi
 
 rm -rf build && mkdir -p build
 for entry in "${SERVICES[@]}"; do
-  IFS='|' read -r name icon url bid <<< "$entry"
+  IFS='|' read -r name icon url bid categories <<< "$entry"
   echo "==> Building $name"
   /usr/bin/python3 -c "import json,sys; json.dump({'name':sys.argv[1],'url':sys.argv[2]}, open('app-config.json','w'))" "$name" "$url"
   npx electron-packager . "$name" --platform=darwin --arch="$ARCH" \
