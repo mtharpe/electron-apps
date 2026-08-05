@@ -337,9 +337,12 @@ What is and isn't shared:
 - **Keyed by the signed-in email, not the slot number.** A slot accidentally signed into the
   wrong account can't log a matching slot elsewhere out of the right one — an app only ever
   adopts a session for the identity that slot is meant to be.
-- **Encrypted at rest** (AES-256-GCM) under a key kept in your OS keyring (libsecret /
-  gnome-keyring), never in a file. If the keyring is unavailable the feature disables itself
-  and nothing is ever written unencrypted — each app just signs in on its own as before.
+- **Encrypted at rest** (AES-256-GCM) under a key kept in your OS keyring, never in a file.
+  It doesn't assume a particular keyring: it tries the ones it knows (libsecret / GNOME
+  Keyring, KDE Wallet, macOS Keychain) and confirms one actually works with a real
+  store-and-read-back before trusting it. If none works on your machine the feature disables
+  itself and nothing is ever written unencrypted — each app just signs in on its own, and the
+  startup log says which keyring it used or why it's off.
 
 This does **not** create sessions, bypass 2FA, or read anything outside these apps. It moves
 an already-authenticated session between your own apps on your own machine. It also can't
