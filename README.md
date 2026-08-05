@@ -146,6 +146,36 @@ right-click → **Options → Keep in Dock**.
 | `~/.local/share/applications/<slug>.desktop` | app-menu entry |
 | `~/.local/share/icons/hicolor/*/apps/<slug>.png` | icons, 16px→512px |
 
+#### Icons follow your icon theme
+
+If your icon theme has its own artwork for one of these apps, that is what you get.
+
+The app-menu and dash icons come free: the `.desktop` file says `Icon=google-keep` — a
+*name*, which the desktop resolves through your active theme. Themes like Papirus, Colloid
+and Numix already ship icons under exactly these names.
+
+The one place that could not follow the theme was the icon Electron hands to the
+notification daemon and the window manager, because that is a **file path**, not a name.
+The installer now resolves it at install time: it reads your active icon theme (GNOME via
+gsettings, KDE via `kdeglobals`), walks the theme's `Inherits` chain the way the
+freedesktop spec says to, and bakes the winner in — rasterising SVG to a 256px PNG, since
+Electron cannot load SVG. The build prints what it chose:
+
+```
+==> Icon theme: Colloid-Dark
+==> Building Google Keep
+    icon: Colloid-Dark (google-keep.svg)
+```
+
+If your theme has nothing for an app, the chain ends at `hicolor` and you get this repo's
+bundled icon — which is why the bundled icons are still installed into `hicolor` even when
+your theme wins. That fallback has to stay: switch to a theme that has never heard of these
+apps and it is the only thing standing between you and a blank icon.
+
+Because this is resolved at **install** time, changing your icon theme later updates the
+menu and dash icons immediately, but not the notification icon — rerun the installer to
+pick that up.
+
 Launch from your desktop's app menu, or run `gmail` / `google-calendar` /
 `google-tasks` / `google-keep` / `google-messages` from a shell.
 
