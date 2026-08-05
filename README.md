@@ -497,12 +497,27 @@ expose the org name in their page title (*Acme Corp*, *Google Calendar*, …); *
 and **Tasks** have no org name in their titles, so they fall back to the signed-in **email**
 read off the account avatar; **Messages** exposes neither, so it keeps its page title.
 
-### Consistent Gmail view
-For the Gmail app only, `main.js` injects a stylesheet that hides Workspace Gmail's left
-**Mail/Chat/Meet/Spaces** app-rail so every account matches the clean personal-Gmail
-layout. The rule targets the rail via `:has()` anchored on the buttons' stable `aria-label`s
-(not Gmail's churning class names), is injected as a stylesheet (which survives Gmail's
-re-renders), and is applied to every window — including account-switch windows.
+### Per-app CSS
+Any app can carry its own stylesheet. Two optional sources are concatenated and injected on
+every document load, in every window (including the ones an account switcher opens):
+
+| Source | Who owns it |
+|---|---|
+| `styles/<slug>.css` | shipped with the app, in this repo |
+| `<userData>/custom.css` | yours — a rebuild never overwrites it |
+
+Only pages on the **app's own host** are styled, so a rule written for Gmail can't run on
+the sign-in page or an SSO provider's. It is injected as a stylesheet rather than an inline
+style, so it survives the page re-rendering.
+
+The one shipped example is `styles/gmail.css`, which hides Workspace Gmail's left
+**Mail/Chat/Meet/Spaces** app-rail so every account matches the clean personal-Gmail layout.
+It targets the rail via `:has()` anchored on the buttons' stable `aria-label`s, not Gmail's
+churning class names.
+
+To restyle any app without touching this repo, drop a `custom.css` in its config directory
+(`~/.config/<App Name>/` on Linux, `~/Library/Application Support/<App Name>/` on macOS) and
+restart it.
 
 ---
 
