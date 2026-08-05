@@ -31,25 +31,50 @@ const APP_ICON = (() => {
   return null;
 })();
 
-// Normalize Workspace Gmail to match personal Gmail by hiding the left Mail/Chat/Meet/Spaces
-// "app-rail" that Workspace accounts show (personal accounts don't). Anchored on the buttons'
-// stable aria-labels via :has() — not Gmail's churning class names — so it keeps working
-// across redesigns and harmlessly matches nothing if the rail ever goes away. Injected as a
-// stylesheet (not an inline style) so it survives Gmail's re-renders.
-const GMAIL_RAIL_HIDE_CSS = `
-[role="navigation"]:has([role="link"][aria-label^="Chat"]),
-[role="navigation"]:has([role="link"][aria-label="Meet"]),
-[role="navigation"]:has([role="link"][aria-label^="Spaces"]) { display: none !important; }
-`;
-const mailHost = (h) => /(^|\.)mail\.google\.com$/.test(h);
-const IS_GMAIL_APP = (() => { try { return mailHost(new URL(APP_URL).hostname); } catch (e) { return false; } })();
+// Per-app CSS. Two sources, both optional, concatenated in this order:
+//
+//   styles/<slug>.css                 shipped with the app (styles/gmail.css hides Workspace
+//                                     Gmail's Mail/Chat/Meet/Spaces rail, for example)
+//   <userData>/custom.css             the user's own, not overwritten by a rebuild
+//
+// This used to be a Gmail-specific constant and a hostname test hardcoded in this file.
+// Nothing about "restyle this app's pages" is Gmail-specific, and a wrapper for a
+// non-Google app is just as likely to want a rule, so it is a file convention now.
+//
+// Injected as a stylesheet rather than an inline style so it survives the page's re-renders.
+const APP_SLUG = typeof cfg.slug === 'string' ? cfg.slug : '';
+
+// Only the app's OWN host gets styled. A rule written for Gmail has no business running on
+// accounts.google.com during sign-in, or on an SSO provider's page.
+const APP_HOST = (() => { try { return new URL(APP_URL).hostname.toLowerCase(); } catch (e) { return ''; } })();
+
+let CUSTOM_CSS = '';
+
+// Read once, after app.setName() — userData is named after the app, so the path is not
+// stable before then.
+function loadCustomCss() {
+  const parts = [];
+  const sources = [
+    APP_SLUG ? path.join(__dirname, 'styles', APP_SLUG + '.css') : null,
+    path.join(app.getPath('userData'), 'custom.css'),
+  ];
+  for (const file of sources) {
+    if (!file) continue;
+    // __dirname is inside the asar in a packaged build; Electron patches fs to read it.
+    try { parts.push(fs.readFileSync(file, 'utf8')); } catch (e) { /* absent is the normal case */ }
+  }
+  CUSTOM_CSS = parts.join('\n');
+}
 
 // Re-apply on every document load. This must cover EVERY webContents, not just the first
-// account window: picking another account from Gmail's switcher opens it in a NEW window,
+// account window: picking another account from an account switcher opens it in a NEW window,
 // and that window needs the rule too. Registered globally below via 'web-contents-created'.
-function applyGmailNormalization(wc) {
+function applyCustomStyles(wc) {
   wc.on('dom-ready', () => {
-    try { if (mailHost(new URL(wc.getURL()).hostname)) wc.insertCSS(GMAIL_RAIL_HIDE_CSS); } catch (e) { /* ignore */ }
+    if (!CUSTOM_CSS) return;
+    try {
+      if (hasSuffix(new URL(wc.getURL()).hostname, [APP_HOST])) wc.insertCSS(CUSTOM_CSS);
+    } catch (e) { /* ignore */ }
   });
 }
 
@@ -169,7 +194,7 @@ function attachLoadRecovery(wc) {
 }
 
 app.on('web-contents-created', (e, wc) => {
-  if (IS_GMAIL_APP) applyGmailNormalization(wc);
+  applyCustomStyles(wc);
   manageWindowTitle(wc);
   attachExternalLinkRouting(wc);
   attachLoadRecovery(wc);
@@ -695,6 +720,8 @@ function rememberAccountEmail(wc) {
 }
 
 app.setName(APP_NAME);
+// Must follow setName: one of the stylesheet sources lives under userData.
+loadCustomCss();
 // Must follow setName: the preference file lives under userData, which is named after the app.
 loadAccounts();
 watchAccountsFile();

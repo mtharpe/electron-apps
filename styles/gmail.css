@@ -1,0 +1,12 @@
+/* Loaded automatically by the app whose slug is "gmail", on pages served by its own host.
+ *
+ * Normalises Workspace Gmail to match personal Gmail by hiding the left
+ * Mail/Chat/Meet/Spaces "app-rail" that Workspace accounts show and personal ones don't.
+ *
+ * Anchored on the buttons' stable aria-labels via :has() rather than Gmail's churning class
+ * names, so it keeps working across redesigns and harmlessly matches nothing if the rail
+ * ever goes away.
+ */
+[role="navigation"]:has([role="link"][aria-label^="Chat"]),
+[role="navigation"]:has([role="link"][aria-label="Meet"]),
+[role="navigation"]:has([role="link"][aria-label^="Spaces"]) { display: none !important; }

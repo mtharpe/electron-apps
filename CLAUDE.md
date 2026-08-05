@@ -34,6 +34,7 @@ desktop app, is what most of `main.js` and `preload.js` are for.
 | `accounts.html` / `accounts-preload.js` | The Configure Accounts window (ordinary hardened renderer, not the stealth one). |
 | `icons/*.icns`, `icons/png/` | App artwork. The Linux build extracts PNG from `.icns` automatically. |
 | `docs/` | README images, generated from `icons/png/`. |
+| `styles/<slug>.css` | Optional per-app CSS, injected on that app's own host. `styles/gmail.css` is the shipped example. |
 
 ---
 
@@ -216,6 +217,28 @@ Nothing in Electron retries a failed navigation. `main.js` adds a backoff retry 
 
 `ERR_ABORTED` (-3) is an ordinary superseded navigation, not a failure — retrying on it
 fights the page.
+
+### Per-app CSS
+
+`styles/<slug>.css` (shipped) and `<userData>/custom.css` (the user's) are concatenated and
+injected on every document load, but **only on the app's own host** — a Gmail rule has no
+business running on the sign-in page or an SSO provider's.
+
+This was Gmail-specific code in `main.js` until it became a file convention. If a new app
+needs a tweak, add a stylesheet; do not add a hostname branch.
+
+`app-config.json` carries the `slug` for this, written by both build scripts.
+
+**Verifying injection:** `document.styleSheets` does **not** enumerate what
+`webContents.insertCSS` adds — checking there reports a false negative. Test with a custom
+property instead:
+
+```css
+:root { --probe: yes; }        /* temporarily, in the stylesheet */
+```
+```js
+getComputedStyle(document.documentElement).getPropertyValue('--probe')
+```
 
 ### Icon theming (Linux)
 

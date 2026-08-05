@@ -376,7 +376,8 @@ for entry in "${SELECTED[@]}"; do
     extract_icns_png "$DIR/icons/$icon.icns" "$png"
   fi
 
-  python3 -c "import json,sys; json.dump({'name':sys.argv[1],'url':sys.argv[2]}, open('app-config.json','w'))" "$name" "$url"
+  # slug travels into the app so main.js can find styles/<slug>.css without re-deriving it.
+  python3 -c "import json,sys; json.dump({'name':sys.argv[1],'url':sys.argv[2],'slug':sys.argv[3]}, open('app-config.json','w'))" "$name" "$url" "$slug"
   # Becomes this app's WM_CLASS (see above); StartupWMClass in the .desktop file matches it.
   set_product_name "$slug"
 
