@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, session, shell, Notification, ipcMain, powerMonitor, nativeTheme, dialog } = require('electron');
+const { app, BrowserWindow, Menu, session, shell, Notification, ipcMain, powerMonitor, nativeTheme, dialog, net } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { execFile, execFileSync, spawn } = require('child_process');
@@ -87,10 +87,92 @@ function manageWindowTitle(wc) {
   wc.on('dom-ready', apply);
 }
 
+// Nothing in Electron retries a navigation that dies — DNS not up yet at login, the
+// network still coming back after sleep, a connection dropped mid-load. The window is just
+// left holding whatever it had. Gmail and Calendar mostly self-heal, because their live
+// data connections keep re-rendering; Tasks and Keep inject their whole stylesheet from the
+// app bundle and then go idle, so a load that dies part-way leaves a permanently blank
+// white window until the user reloads by hand. Hence: retry, with a backoff so a genuinely
+// unreachable network isn't hammered.
+const RELOAD_BACKOFF_MS = [1000, 2000, 5000, 10000, 20000, 30000];
+// While the machine is offline a retry cannot succeed, so we wait on the network coming
+// back instead of spending (and escalating) an attempt on a certain failure.
+const OFFLINE_POLL_MS = 2000;
+const ERR_ABORTED = -3;
+// How long a new window waits for a first frame before it is shown anyway.
+const REVEAL_DEADLINE_MS = 4000;
+
+// Keyed by webContents so the state dies with the window it belongs to.
+const reloadAttempts = new WeakMap();
+const reloadTimers = new WeakMap();
+
+function cancelReloadRetry(wc) {
+  const timer = reloadTimers.get(wc);
+  if (timer) { clearTimeout(timer); reloadTimers.delete(wc); }
+}
+
+// `url` is the address to retry. Retrying a failed navigation loads that address again
+// explicitly rather than calling reload(), which would depend on what Chromium left in the
+// history entry after the failure — loading the known-good URL does not. Omit `url` (the
+// post-sleep path) to refresh whatever the window is already showing.
+function scheduleReload(wc, url) {
+  if (wc.isDestroyed() || reloadTimers.has(wc)) return; // one retry in flight at a time
+  const attempt = reloadAttempts.get(wc) || 0;
+  const delay = RELOAD_BACKOFF_MS[Math.min(attempt, RELOAD_BACKOFF_MS.length - 1)];
+  reloadTimers.set(wc, setTimeout(() => {
+    reloadTimers.delete(wc);
+    if (wc.isDestroyed()) return;
+    // Still no network: come back later WITHOUT counting this as an attempt, so the backoff
+    // reflects real failed loads rather than how long the laptop sat offline.
+    if (!net.isOnline()) {
+      reloadTimers.set(wc, setTimeout(() => { reloadTimers.delete(wc); scheduleReload(wc, url); }, OFFLINE_POLL_MS));
+      return;
+    }
+    reloadAttempts.set(wc, attempt + 1);
+    // A rejection here is the same failure did-fail-load is about to report, and that
+    // handler is what queues the next attempt — so swallow it rather than double-counting.
+    if (url) wc.loadURL(url, { userAgent: CHROME_UA }).catch(() => {});
+    else wc.reload();
+  }, delay));
+}
+
+// Whether the load currently in flight has already reported a failure. Reset at the start
+// of every navigation, so it always describes the attempt in progress and nothing else.
+const loadFailed = new WeakSet();
+
+function attachLoadRecovery(wc) {
+  wc.on('did-start-loading', () => loadFailed.delete(wc));
+
+  wc.on('did-fail-load', (e, errorCode, errorDesc, validatedURL, isMainFrame) => {
+    // A dead subresource or iframe is not a dead window — Google's pages routinely lose a
+    // hovercard or a cookie-rotation frame and carry on fine. Only the main frame matters.
+    if (!isMainFrame) return;
+    // ERR_ABORTED is an ordinary superseded navigation (a redirect taking over, the user
+    // clicking through mid-load), not a failure. Reloading on it would fight the page.
+    if (errorCode === ERR_ABORTED) return;
+    loadFailed.add(wc);
+    scheduleReload(wc, validatedURL);
+  });
+
+  wc.on('did-finish-load', () => {
+    // A failed navigation still COMMITS Chromium's error document, and finishing that
+    // document fires this event — measured: did-fail-load, then did-finish-load for the
+    // same URL. Resetting here unconditionally cancelled the retry that had just been
+    // queued, which is why nothing ever retried. Only a load that did not fail counts.
+    if (loadFailed.has(wc)) return;
+    // A load that lands clears the backoff, so a later unrelated failure starts fresh.
+    cancelReloadRetry(wc);
+    reloadAttempts.delete(wc);
+  });
+
+  wc.on('destroyed', () => cancelReloadRetry(wc));
+}
+
 app.on('web-contents-created', (e, wc) => {
   if (IS_GMAIL_APP) applyGmailNormalization(wc);
   manageWindowTitle(wc);
   attachExternalLinkRouting(wc);
+  attachLoadRecovery(wc);
   wc.on('dom-ready', () => rememberAccountEmail(wc));
 });
 
@@ -899,6 +981,8 @@ function openAccountWindow(n) {
   const win = new BrowserWindow(Object.assign({
     width: 1280,
     height: 860,
+    // Held back until the renderer has a first frame — see reveal() below.
+    show: false,
     title: accountLabel(n) || APP_NAME + ' — Account ' + n,
     backgroundColor: windowBackground(),
     webPreferences: Object.assign({ partition }, STEALTH_WEBPREFS),
@@ -909,10 +993,30 @@ function openAccountWindow(n) {
   // Link routing (target=_blank / pop-outs → Chrome, Google/SSO popups in-app) is attached
   // globally in 'web-contents-created' so it covers secondary account windows too.
 
+  // 'ready-to-show' means the renderer has something to present, so the window never
+  // appears mid-paint. But it is not guaranteed to fire — a load that stalls is exactly the
+  // case this is guarding against — and a window that never appears is worse than one that
+  // appears blank. So a deadline reveals it regardless; getting content INTO it is the
+  // retry layer's job, not this one's.
+  let revealTimer = null;
+  const reveal = () => {
+    if (revealTimer) { clearTimeout(revealTimer); revealTimer = null; }
+    if (win.isDestroyed() || win.isVisible()) return;
+    // Maximizing a hidden window is unreliable across Linux WMs, so re-assert it here where
+    // the window is about to be mapped.
+    if (!win.isMaximized()) win.maximize();
+    win.show();
+  };
+  revealTimer = setTimeout(reveal, REVEAL_DEADLINE_MS);
+  win.once('ready-to-show', reveal);
+
   win.maximize();
   win.loadURL(APP_URL, { userAgent: CHROME_UA });
   windows.set(n, win);
-  win.on('closed', () => windows.delete(n));
+  win.on('closed', () => {
+    if (revealTimer) { clearTimeout(revealTimer); revealTimer = null; }
+    windows.delete(n);
+  });
   return win;
 }
 
@@ -1198,9 +1302,17 @@ if (!gotSingleInstanceLock) {
     // connection (Calendar then shows "could not load the data"). Reload every window so
     // all open profiles refresh and resume firing notifications. Fires on macOS wake and
     // on Linux via logind's PrepareForSleep signal.
+    //
+    // 'resume' arrives well before the network does: reloading immediately used to strand
+    // every window on ERR_INTERNET_DISCONNECTED, with nothing to recover it, so the whole
+    // app sat dead until each window was reloaded by hand. So wait for the connection.
+    // net.isOnline() reporting true is not proof the route is usable either — the retry
+    // layer is what actually settles it — but it keeps the common case off a doomed load.
     powerMonitor.on('resume', () => {
       for (const win of BrowserWindow.getAllWindows()) {
-        if (!win.isDestroyed()) win.webContents.reload();
+        if (win.isDestroyed()) continue;
+        if (net.isOnline()) win.webContents.reload();
+        else scheduleReload(win.webContents);
       }
     });
   });
