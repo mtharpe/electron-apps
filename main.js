@@ -161,6 +161,79 @@ function scheduleReload(wc, url) {
   }, delay));
 }
 
+// Waking from sleep is not the same problem as a failed load, and net.isOnline() is not a
+// good enough answer to "can we talk to the server yet". It reflects the OS network-change
+// notifier, which flips to true as soon as an interface has a link — while DHCP, DNS and
+// routing are still settling, and long before a VPN or a captive portal has let anything
+// through. Reloading on that signal produces a window full of error page, which is exactly
+// what this is supposed to prevent.
+//
+// So ask the only question that matters: does the app's own origin answer? Nothing is
+// reloaded until something does.
+const REACHABILITY_TIMEOUT_MS = 5000;
+const REACHABILITY_BACKOFF_MS = [1000, 2000, 5000, 10000, 15000, 30000];
+
+function probeOrigin() {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (ok) => { if (!settled) { settled = true; resolve(ok); } };
+    let req;
+    // Any HTTP response means the server answered; the status is irrelevant, a redirect or
+    // even a 4xx proves the path is open.
+    try {
+      req = net.request({ method: 'HEAD', url: APP_URL });
+      req.on('response', () => finish(true));
+      req.on('error', () => finish(false));
+      req.end();
+    } catch (e) {
+      finish(false);
+      return;
+    }
+    setTimeout(() => { try { req.abort(); } catch (e) {} finish(false); }, REACHABILITY_TIMEOUT_MS);
+  });
+}
+
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// One recovery at a time: suspend/resume can fire in quick succession (lid closed, opened,
+// closed again) and a second pass would race the first.
+let resumeRecovery = null;
+
+// Logged, not silent. The failure this exists for is invisible from inside the app -- a
+// window holding a dead connection looks identical to an idle one -- so the journal is the
+// only place the behaviour can be confirmed after the fact. `journalctl --user -t <slug>`,
+// or grep the launcher's output for "[recovery]".
+function logRecovery(msg) {
+  try { console.log('[recovery] ' + msg); } catch (e) { /* never worth taking the app down */ }
+}
+
+function recoverAfterResume(trigger) {
+  if (resumeRecovery) {
+    logRecovery(trigger + ': already recovering, ignored');
+    return resumeRecovery;
+  }
+  const started = Date.now();
+  logRecovery(trigger + ': waiting for ' + APP_URL + ' to answer');
+  resumeRecovery = (async () => {
+    for (let attempt = 0; ; attempt++) {
+      if (await probeOrigin()) break;
+      await wait(REACHABILITY_BACKOFF_MS[Math.min(attempt, REACHABILITY_BACKOFF_MS.length - 1)]);
+    }
+    let reloaded = 0;
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (win.isDestroyed()) continue;
+      // NOT the Accounts window. It is a local form, it has nothing stale to refresh, and
+      // reloading it would throw away a name the user had half-finished typing.
+      if (win === accountsWindow) continue;
+      win.webContents.reload();
+      reloaded++;
+    }
+    logRecovery(trigger + ': reachable after ' + (Date.now() - started) + 'ms, reloaded ' + reloaded + ' window(s)');
+  })().catch(() => { /* a reload that fails is the retry layer's problem, not this one's */ })
+    .finally(() => { resumeRecovery = null; });
+  return resumeRecovery;
+}
+
 // Whether the load currently in flight has already reported a failure. Reset at the start
 // of every navigation, so it always describes the attempt in progress and nothing else.
 const loadFailed = new WeakSet();
@@ -1349,16 +1422,17 @@ if (!gotSingleInstanceLock) {
     //
     // 'resume' arrives well before the network does: reloading immediately used to strand
     // every window on ERR_INTERNET_DISCONNECTED, with nothing to recover it, so the whole
-    // app sat dead until each window was reloaded by hand. So wait for the connection.
-    // net.isOnline() reporting true is not proof the route is usable either — the retry
-    // layer is what actually settles it — but it keeps the common case off a doomed load.
-    powerMonitor.on('resume', () => {
-      for (const win of BrowserWindow.getAllWindows()) {
-        if (win.isDestroyed()) continue;
-        if (net.isOnline()) win.webContents.reload();
-        else scheduleReload(win.webContents);
-      }
-    });
+    // app sat dead until each window was reloaded by hand. recoverAfterResume() waits until
+    // the origin actually answers before touching anything.
+    powerMonitor.on('resume', () => recoverAfterResume('resume'));
+
+    // Belt and braces: on a machine where 'resume' does not arrive (it comes from logind's
+    // PrepareForSleep on Linux, and a session without that just never fires it), a long
+    // sleep would otherwise leave every window holding a dead connection with nothing to
+    // notice. Waking a laptop reliably produces a screen unlock, so treat that as the
+    // backstop trigger. The reachability probe means a spurious unlock costs one HEAD
+    // request, and the single-flight guard means a real wake does not recover twice.
+    powerMonitor.on('unlock-screen', () => recoverAfterResume('unlock-screen'));
   });
 }
 
