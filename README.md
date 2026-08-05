@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/apps.png" alt="Gmail, Google Calendar, Google Tasks, Google Keep, Google Messages" width="600">
+<img src="docs/apps.png" alt="Gmail, Google Calendar, Google Tasks, Google Keep, Google Messages, Tidal" width="700">
 
 # Electron Apps
 
@@ -13,7 +13,8 @@ Ships with a set of apps ready to go; **[adding your own is one line](#add--chan
 
 <p>
 <img alt="Platform: macOS and Linux" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-informational">
-<img alt="Electron 42" src="https://img.shields.io/badge/Electron-42-47848F?logo=electron&logoColor=white">
+<img alt="Electron 42 (castlabs ECS)" src="https://img.shields.io/badge/Electron-42%20ECS-47848F?logo=electron&logoColor=white">
+<img alt="Widevine DRM supported" src="https://img.shields.io/badge/Widevine-supported-informational">
 <img alt="No dependencies beyond Node" src="https://img.shields.io/badge/runtime%20deps-none-success">
 <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-green">
 </p>
@@ -29,6 +30,10 @@ Ships with a set of apps ready to go; **[adding your own is one line](#add--chan
 These ship configured out of the box. They are a starting set, not the point — anything
 with a URL can be an app here.
 
+Tidal is the one that earns the Electron fork: it has no official Linux client, and its
+audio is **Widevine-protected**, which stock Electron cannot play at all. See
+[DRM / protected content](#drm--protected-content).
+
 |  | App | Opens | Install name |
 |:--:|---|---|---|
 | <img src="docs/icons/gmail.png" width="40"> | **Gmail** | `mail.google.com` | `gmail` |
@@ -36,6 +41,7 @@ with a URL can be an app here.
 | <img src="docs/icons/google-tasks.png" width="40"> | **Google Tasks** | `tasks.google.com` | `google-tasks` |
 | <img src="docs/icons/google-keep.png" width="40"> | **Google Keep** | `keep.google.com` | `google-keep` |
 | <img src="docs/icons/google-messages.png" width="40"> | **Google Messages** | `messages.google.com` | `google-messages` |
+| <img src="docs/icons/tidal.png" width="40"> | **Tidal** | `listen.tidal.com` | `tidal` |
 
 Install all of them, **[just the ones you want](#choosing-which-apps-to-install)**, or none
 of them — **[add your own](#add--change-a-service)** and build only that.
@@ -343,6 +349,37 @@ resists being embedded, something it will actually sign you into.
 | `icons/` | 1024px `.icns` app icons (macOS). |
 | `icons/png/` | PNGs extracted from those `.icns` files, used by the Linux build. Regenerated automatically if missing. |
 | `docs/` | Images used by this README (the icon strip and the per-app icons), generated from `icons/png/`. |
+
+### DRM / protected content
+
+Some services will not play in a stock Electron at all. Tidal is the example here: its audio
+is Widevine-protected, and stock Electron ships no Content Decryption Module, so playback is
+impossible rather than merely degraded. Measured in stock Electron:
+
+```
+com.widevine.alpha        NotSupportedError: Unsupported keySystem
+org.w3.clearkey           SUPPORTED          (built in, and no use to Tidal)
+com.microsoft.playready   NotSupportedError
+```
+
+So `package.json` pins Electron to
+[castlabs' Electron for Content Security](https://github.com/castlabs/electron-releases) — a
+drop-in fork at the **same Electron version** (`v42.8.0+wvcus` against upstream `42.8.0`), so
+every other app runs on an identical Chromium. It installs the Widevine CDM on first launch,
+after which `com.widevine.alpha` is supported and `createMediaKeys()` succeeds.
+
+Two consequences worth knowing:
+
+- **Windows wait for the CDM.** A renderer created before it is ready never gets one, so it
+  would silently fail to play for its whole life. The wait is bounded (15s) — a machine that
+  wakes with no network opens its windows anyway rather than showing nothing, and logs
+  `[recovery] widevine not ready`.
+- **The build downloads Electron from the fork.** `ELECTRON_MIRROR` is set for you; the
+  official releases have no `+wvcus` tag and the download 404s without it. For the same
+  reason the build runs a bare `npm install` — naming `electron` explicitly would pull stock
+  Electron from the registry and quietly break DRM playback.
+
+Nothing else changes. If you build only the Google apps you will never notice any of this.
 
 ### Getting past Google's login block
 Spoofing the User-Agent alone (what plain Nativefier does) is **not** enough — Google also

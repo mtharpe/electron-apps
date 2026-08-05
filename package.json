@@ -8,6 +8,6 @@
   "license": "MIT",
   "devDependencies": {
     "@electron/packager": "^20.1.1",
-    "electron": "^42.8.0"
+    "electron": "github:castlabs/electron-releases#v42.8.0+wvcus"
   }
 }

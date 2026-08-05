@@ -841,6 +841,38 @@ function spoofSession(sess) {
   sess.setPermissionCheckHandler((wc, permission) => GRANTED.has(permission));
 }
 
+// Widevine. Stock Electron ships no CDM, so a DRM service (Tidal's audio, for one) simply
+// cannot play in it — measured: requestMediaKeySystemAccess('com.widevine.alpha') throws
+// NotSupportedError. This repo therefore builds on castlabs' Electron for Content Security,
+// a drop-in fork pinned to the same Electron version, which installs the CDM on first run.
+//
+// The install has to finish BEFORE any window exists: a renderer created without a CDM
+// keeps that handicap for its whole life, so an early window would silently never play.
+//
+// But it is a network operation, and blocking window creation on the network is how you end
+// up with an app that shows nothing at all on a machine that woke up without Wi-Fi. So it
+// is bounded: wait, and if it has not finished in time, open the windows anyway. A DRM app
+// then fails to play until the next launch, which is a far better outcome than no window.
+const WIDEVINE_READY_TIMEOUT_MS = 15000;
+
+async function whenWidevineReady() {
+  let components;
+  try { components = require('electron').components; } catch (e) { return; }
+  // Stock Electron has no `components` at all; nothing to wait for.
+  if (!components || typeof components.whenReady !== 'function') return;
+  const started = Date.now();
+  try {
+    await Promise.race([
+      components.whenReady(),
+      wait(WIDEVINE_READY_TIMEOUT_MS).then(() => { throw new Error('timed out'); }),
+    ]);
+    logRecovery('widevine ready in ' + (Date.now() - started) + 'ms');
+  } catch (e) {
+    logRecovery('widevine not ready after ' + (Date.now() - started) + 'ms (' +
+      (e && e.message) + ') — opening windows anyway; DRM playback will not work this run');
+  }
+}
+
 // acctNum -> BrowserWindow
 const windows = new Map();
 
@@ -913,8 +945,23 @@ function hasSuffix(host, suffixes) {
 const GOOGLE_HOST_SUFFIXES = [
   'google.com', 'gstatic.com', 'googleusercontent.com', 'googleapis.com',
 ];
-function isGoogleHost(host) {
-  return hasSuffix(host, GOOGLE_HOST_SUFFIXES);
+
+// The app's OWN registrable domain, derived from its URL: listen.tidal.com -> tidal.com.
+// Naive last-two-labels, which is wrong for public suffixes like .co.uk (it would yield
+// "co.uk" and match far too much) -- so it is only ever used to keep an app's own pages
+// in-app, never to grant trust. A too-broad match there costs a page opening in the app
+// instead of the browser, not a security boundary.
+const APP_DOMAIN = (() => {
+  const parts = APP_HOST.split('.').filter(Boolean);
+  return parts.length >= 2 ? parts.slice(-2).join('.') : APP_HOST;
+})();
+
+// Kept in-app rather than pushed out to the browser. Google's hosts are here because four
+// of the bundled apps are Google's and their UI spans several of them; the app's own domain
+// is here because every app needs its own pages, and a Tidal wrapper that opened
+// tidal.com links in Firefox would be useless -- sign-in alone would never complete.
+function isFirstPartyHost(host) {
+  return hasSuffix(host, GOOGLE_HOST_SUFFIXES) || (!!APP_DOMAIN && hasSuffix(host, [APP_DOMAIN]));
 }
 
 // Enterprise SSO / identity-provider domains. Corporate Google Workspace sign-in commonly
@@ -1068,7 +1115,7 @@ function attachExternalLinkRouting(wc) {
         openInChrome(u.searchParams.get('q') || u.searchParams.get('url') || url, slot);
         return { action: 'deny' };
       }
-      if (isGoogleHost(u.hostname) || isAuthHost(u.hostname)) {
+      if (isFirstPartyHost(u.hostname) || isAuthHost(u.hostname)) {
         const part = wc.session && wc.session.__partition;
         const webPreferences = part
           ? Object.assign({ partition: part }, STEALTH_WEBPREFS)
@@ -1386,7 +1433,8 @@ if (!gotSingleInstanceLock) {
     win.focus();
   });
 
-  app.whenReady().then(() => {
+  app.whenReady().then(async () => {
+    await whenWidevineReady();
     // Populates the Help → About dialog. macOS fills this from the bundle's Info.plist,
     // but on Linux the About panel is empty unless it's set explicitly.
     app.setAboutPanelOptions(Object.assign({

@@ -35,6 +35,7 @@ desktop app, is what most of `main.js` and `preload.js` are for.
 | `icons/*.icns`, `icons/png/` | App artwork. The Linux build extracts PNG from `.icns` automatically. |
 | `docs/` | README images, generated from `icons/png/`. |
 | `styles/<slug>.css` | Optional per-app CSS, injected on that app's own host. `styles/gmail.css` is the shipped example. |
+| `icons/png/<icon>.png` | App artwork. Tidal's came from its own web app manifest, which is where to look for any site's icon. |
 
 ---
 
@@ -217,6 +218,37 @@ Nothing in Electron retries a failed navigation. `main.js` adds a backoff retry 
 
 `ERR_ABORTED` (-3) is an ordinary superseded navigation, not a failure — retrying on it
 fights the page.
+
+### DRM (why Electron is a fork here)
+
+`package.json` pins Electron to [castlabs ECS](https://github.com/castlabs/electron-releases)
+(`v42.8.0+wvcus`), not stock Electron. Stock ships no Widevine CDM, so a DRM service cannot
+play in it — measured, `requestMediaKeySystemAccess('com.widevine.alpha')` throws
+`NotSupportedError`. It is a drop-in fork at the same Electron version, so the non-DRM apps
+run on an identical Chromium.
+
+Three ways this bites if you are not expecting it:
+
+- **Never run `npm install electron`.** Naming the package explicitly resolves stock Electron
+  from the registry and silently replaces the fork; apps still build and simply never play
+  DRM. The build scripts run a bare `npm install` deliberately.
+- **`ELECTRON_MIRROR` must point at the fork.** `@electron/packager` downloads the Electron
+  dist itself and defaults to `electron/electron`, where the `+wvcus` tag does not exist —
+  the build 404s. Both build scripts export it.
+- **Windows must wait for `components.whenReady()`.** A renderer created before the CDM is
+  installed never gets one and fails to play for its whole life. `whenWidevineReady()` does
+  this, bounded at 15s so a machine with no network still opens its windows.
+
+Verify with `createMediaKeys()`, not just `requestMediaKeySystemAccess` — the former proves a
+usable CDM rather than a feature-detect:
+
+```js
+const a = await navigator.requestMediaKeySystemAccess('com.widevine.alpha', [{
+  initDataTypes: ['cenc'],
+  audioCapabilities: [{ contentType: 'audio/mp4; codecs="mp4a.40.2"' }]
+}]);
+await a.createMediaKeys();
+```
 
 ### Per-app CSS
 
