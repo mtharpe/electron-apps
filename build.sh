@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
-# Rebuild & install the standalone Google apps (Gmail, Calendar, Tasks, Keep).
-# Usage:  ./build.sh           # build all four, install to ~/Applications, ad-hoc sign
+# Rebuild & install the standalone Google apps. Which apps is up to you — see
+# services.conf for the full set, or run --list.
+#
+# Usage:  ./build.sh                 # pick from a menu (all, if not run in a terminal)
+#         ./build.sh gmail keep      # just those; name by short key, slug or full name
+#         ./build.sh --all           # everything, no prompt
+#         ./build.sh --list          # show what's available
+#
+# Installs to ~/Applications and ad-hoc signs each app.
 # Requires: node + npm (brew install node)
 set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -18,6 +25,23 @@ ARCH="${ARCH:-$([ "$(uname -m)" = "x86_64" ] && echo x64 || echo arm64)}"
 
 # service | icon-name | url | bundle-id | categories (categories are Linux-only, unused here)
 . "$DIR/services.conf"
+# Shared with build-linux.sh so both installers agree on what an app can be called.
+. "$DIR/select-services.sh"
+
+usage() { sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; }
+
+WANTED=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --all)     WANTED=("${SERVICES[@]%%|*}") ;;
+    --list)    list_services; exit 0 ;;
+    -h|--help) usage; exit 0 ;;
+    -*)        echo "Unknown option: $1" >&2; usage >&2; exit 1 ;;
+    *)         WANTED[${#WANTED[@]}]="$1" ;;
+  esac
+  shift
+done
+resolve_services ${WANTED[@]+"${WANTED[@]}"}
 
 # Install build deps on first run (electron + packager are devDependencies).
 if [ ! -d node_modules ]; then
@@ -26,7 +50,7 @@ if [ ! -d node_modules ]; then
 fi
 
 rm -rf build && mkdir -p build
-for entry in "${SERVICES[@]}"; do
+for entry in "${SELECTED[@]}"; do
   IFS='|' read -r name icon url bid categories <<< "$entry"
   echo "==> Building $name"
   /usr/bin/python3 -c "import json,sys; json.dump({'name':sys.argv[1],'url':sys.argv[2]}, open('app-config.json','w'))" "$name" "$url"
