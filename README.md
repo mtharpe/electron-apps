@@ -626,10 +626,10 @@ exactly like the rest.
 This used to be documented as impossible: Messages was said to render only with
 `contextIsolation:true`, which the sign-in stealth (which needs `contextIsolation:false`)
 rules out, leaving no config that both rendered and signed in. That is no longer true.
-Measured against `https://messages.google.com/web/` under the standard `STEALTH_WEBPREFS`,
-the page renders fully — 17 stylesheets, correct dark theme, the whole welcome screen — and
-Messages once again offers **both** "Sign In" and "Pair with QR code", so the QR path that
-was reported removed is back.
+Under the standard `STEALTH_WEBPREFS` the page renders fully — 17 stylesheets, correct dark
+theme, the whole welcome screen — it offers **both** "Sign In" and "Pair with QR code", so
+the QR path that was reported removed is back, and **signing in works**. No `main.js`
+change was needed for any of it.
 
 `set-messages-icon.sh` is left in the repo but is no longer part of setting Messages up. It
 applied `icons/messages.icns` to a Safari "Add to Dock" web app on macOS, which is the
