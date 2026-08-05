@@ -4,10 +4,12 @@
 
 # Electron Apps
 
-**Google's web apps as real desktop apps — on macOS and Linux.**
+**Turn any web app into a real desktop app — on macOS and Linux.**
 
-Own icon. Own taskbar identity. Real Google sign-in that isn't blocked.
-A separate isolated window per account. Native notification banners. No Chrome required.
+Own icon. Own taskbar identity. A separate isolated window per account. Native notification
+banners. No browser required. Even Google sign-in works, which most wrappers can't manage.
+
+Ships with a set of apps ready to go; **[adding your own is one line](#add--change-a-service)**.
 
 <p>
 <img alt="Platform: macOS and Linux" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-informational">
@@ -16,13 +18,16 @@ A separate isolated window per account. Native notification banners. No Chrome r
 <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-green">
 </p>
 
-<sub>Not affiliated with or endorsed by Google.</sub>
+<sub>Not affiliated with or endorsed by any of the services it wraps.</sub>
 
 </div>
 
 ---
 
-## The apps
+## Included apps
+
+These ship configured out of the box. They are a starting set, not the point — anything
+with a URL can be an app here.
 
 |  | App | Opens | Install name |
 |:--:|---|---|---|
@@ -32,22 +37,26 @@ A separate isolated window per account. Native notification banners. No Chrome r
 | <img src="docs/icons/google-keep.png" width="40"> | **Google Keep** | `keep.google.com` | `google-keep` |
 | <img src="docs/icons/google-messages.png" width="40"> | **Google Messages** | `messages.google.com` | `google-messages` |
 
-Install all of them or **[just the ones you want](#choosing-which-apps-to-install)** — and
-[add your own](#add--change-a-service) in one line.
+Install all of them, **[just the ones you want](#choosing-which-apps-to-install)**, or none
+of them — **[add your own](#add--change-a-service)** and build only that.
 
 ---
 
 ## Why this exists
 
-A Chrome PWA is still Chrome: it lives in a Chrome profile, dies when you sign out of that
-profile, and gives you one account per profile. A plain [Nativefier](https://github.com/nativefier/nativefier)
-wrapper gets you a standalone app that **Google refuses to sign you into** — the infamous
-*"This browser or app may not be secure."*
+A browser PWA is still the browser: it lives in a browser profile, dies when you sign out of
+that profile, and gives you one account per profile. A plain
+[Nativefier](https://github.com/nativefier/nativefier) wrapper gets you a standalone app,
+but one that sites can detect as an embedded browser — Google, for instance, refuses to
+sign you in at all: *"This browser or app may not be secure."*
 
-|  | Chrome PWA | Nativefier | **This** |
+This fixes both. Most web apps need nothing beyond a URL and an icon; the machinery below
+exists for the ones that fight back.
+
+|  | Browser PWA | Nativefier | **This** |
 |---|:--:|:--:|:--:|
-| Independent of Chrome | ❌ | ✅ | ✅ |
-| Google sign-in works | ✅ | ❌ | ✅ |
+| Independent of your browser | ❌ | ✅ | ✅ |
+| Sign-in works even on Google | ✅ | ❌ | ✅ |
 | Several accounts, isolated, side by side | ❌ | ❌ | ✅ |
 | Native notification banners | ✅ | ⚠️ | ✅ |
 | Own taskbar / Dock identity | ⚠️ | ✅ | ✅ |
@@ -87,9 +96,9 @@ Linux each app gets its own `WM_CLASS`, so they never collapse into one taskbar 
 </td>
 <td width="50%" valign="top">
 
-**Google sign-in works**
+**Even hostile sign-ins work**
 A stealth layer makes the embedded Chromium indistinguishable from stock desktop Chrome,
-defeating the embedded-browser login block.
+defeating embedded-browser login blocks — Google's included.
 
 </td>
 </tr>
@@ -98,7 +107,7 @@ defeating the embedded-browser login block.
 
 **Multiple accounts, truly isolated**
 Every window has its own persistent session and cookie jar, so each can be a different
-Google account. Open as many as you like.
+account on the same service. Open as many as you like.
 
 </td>
 <td valign="top">
@@ -113,7 +122,7 @@ app, even when the IdP opens a popup. Vanity domains configurable without a rebu
 <td valign="top">
 
 **Links land in the right browser — and profile**
-Links that leave Google open in your real browser, and each account window can be pinned to
+Links that leave the app open in your real browser, and each account window can be pinned to
 a Chrome profile so work links open in your work profile.
 
 </td>
@@ -316,8 +325,10 @@ pick that up.
 
 ## How it works
 
-Each app is a thin [Electron](https://www.electronjs.org/) wrapper around one Google URL,
-built with [`@electron/packager`](https://github.com/electron/packager).
+Each app is a thin [Electron](https://www.electronjs.org/) wrapper around one URL, built
+with [`@electron/packager`](https://github.com/electron/packager). Everything below is what
+turns that into something that behaves like a native app — and, where a site actively
+resists being embedded, something it will actually sign you into.
 
 | File | Role |
 |---|---|
@@ -493,10 +504,27 @@ re-renders), and is applied to every window — including account-switch windows
 ## Configuration
 
 ### Add / change a service
-Edit **`services.conf`** (`name | icon | url | bundle-id | categories`) — it's shared by
-both build scripts, so a service added there appears on both platforms. Drop a matching
-`icons/<name>.icns` in place and re-run the build. The Linux build extracts the PNG it
-needs from that `.icns` automatically, so you don't have to supply both.
+Nothing here is Google-specific. Any URL can be an app — append a line to **`services.conf`**
+(`name | icon | url | bundle-id | categories`), drop in an icon, and build it:
+
+```bash
+# services.conf
+"Linear|linear|https://linear.app/|com.example.linearapp|Development;ProjectManagement;"
+```
+
+```bash
+./build-linux.sh linear      # build just the new one; other installed apps are untouched
+```
+
+`services.conf` is shared by both build scripts, so a service added there appears on both
+platforms. Supply `icons/<name>.icns` **or** `icons/png/<name>.png` — the Linux build
+extracts the PNG it needs from an `.icns` automatically, so you don't have to provide both.
+
+One thing to get right: **point at the standalone page a human would use**, not an embedded
+variant meant to live in an iframe inside another product. Those render as stripped-down
+panels when loaded on their own and can't theme themselves, because they expect a parent
+frame to drive them. This repo shipped exactly that bug for Tasks — see the note in
+[`CLAUDE.md`](./CLAUDE.md#adding-an-app).
 
 The last field is the [freedesktop category
 list](https://specifications.freedesktop.org/menu-spec/latest/apa.html) used for the Linux
@@ -595,7 +623,7 @@ workaround this app replaces.
 - On Linux, notifications posted from inside a service worker can't be displayed — see
   [Notification paths on Linux](#notification-paths-on-linux). Calendar reminders are not
   affected.
-- Not affiliated with or endorsed by Google.
+- Not affiliated with or endorsed by any of the services it wraps.
 
 ---
 
