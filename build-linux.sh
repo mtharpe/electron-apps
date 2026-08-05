@@ -10,6 +10,7 @@
 #         ./build-linux.sh --uninstall keep # remove just those
 #         PREFIX=~/.local ./build-linux.sh
 #         ARCH=arm64 ./build-linux.sh
+#         ICON_THEME=Papirus-Dark ./build-linux.sh   # default: whatever this machine uses
 #
 # Requires: node + npm. ImageMagick or python3-Pillow is used to build the icon-size
 # ladder; without either, a single full-size icon is installed instead.
@@ -356,9 +357,11 @@ PY
 mkdir -p "$PREFIX/lib" "$PREFIX/bin" "$APPS_DIR" "$ICONS_DIR"
 rm -rf build && mkdir -p build
 
-# Resolved once: the theme cannot change halfway through a build, and the lookup walks the
-# whole icon tree.
-ICON_THEME="$(icon_theme_name)"
+# Whatever icon theme THIS machine is set to — read at install time, never assumed. Export
+# ICON_THEME to build against a different one (useful when installing for another user's
+# setup, or to check what a theme would look like without switching to it).
+# Resolved once: the theme cannot change halfway through a build.
+ICON_THEME="${ICON_THEME:-$(icon_theme_name)}"
 echo "==> Icon theme: $ICON_THEME"
 
 for entry in "${SELECTED[@]}"; do

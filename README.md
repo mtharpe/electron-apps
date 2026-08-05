@@ -172,6 +172,24 @@ bundled icon — which is why the bundled icons are still installed into `hicolo
 your theme wins. That fallback has to stay: switch to a theme that has never heard of these
 apps and it is the only thing standing between you and a blank icon.
 
+Nothing here is specific to any one theme — the installer reads whatever the machine is set
+to, per install. On a box with no theme icons for these apps every one falls back to
+`hicolor` and the build says so:
+
+```
+==> Icon theme: Adwaita
+==> Building Google Tasks
+    icon: hicolor (google-tasks.png)
+```
+
+Override the detection with `ICON_THEME` to build against a theme other than the active
+one — handy for installing to someone else's setup, or previewing a theme without
+switching to it:
+
+```bash
+ICON_THEME=Papirus-Dark ./build-linux.sh
+```
+
 Because this is resolved at **install** time, changing your icon theme later updates the
 menu and dash icons immediately, but not the notification icon — rerun the installer to
 pick that up.
