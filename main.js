@@ -2,6 +2,7 @@ const { app, BrowserWindow, Menu, session, shell, Notification, ipcMain, powerMo
 const path = require('path');
 const fs = require('fs');
 const { execFile, execFileSync, spawn } = require('child_process');
+const sessionSync = require('./session-sync');
 
 const cfg = JSON.parse(fs.readFileSync(path.join(__dirname, 'app-config.json'), 'utf8'));
 const APP_NAME = cfg.name;
@@ -798,6 +799,16 @@ loadCustomCss();
 // Must follow setName: the preference file lives under userData, which is named after the app.
 loadAccounts();
 watchAccountsFile();
+// Single sign-on across the apps: sign into an account once, and the other apps for it adopt
+// the session. Shares only Google auth cookies, encrypted at rest with a key in the OS
+// keyring, keyed by the signed-in email — see session-sync.js. Disables itself if the
+// keyring is unavailable, so this call is safe on any platform.
+sessionSync.init({
+  storeDir: path.join(ACCOUNTS_DIR, 'sessions'),
+  emailForSlot: (n) => accountConfig(n).email,
+  windowsForSlot: (n) => { const w = windows.get(n); return w ? [w] : []; },
+  log: logRecovery,
+});
 loadThemePreference();
 applyColorScheme();
 // Before app ready on purpose: GTK reads GTK_THEME once, when the toolkit initializes.
@@ -1141,6 +1152,9 @@ function openAccountWindow(n) {
   // Remember which partition this session belongs to so attachExternalLinkRouting can keep
   // any allowed child window (account switcher, SSO popup) in the same cookie jar.
   sess.__partition = partition;
+  // Publish this slot's session when the user signs in here, so the other apps for the same
+  // account can adopt it. Idempotent, so calling it every open is fine.
+  sessionSync.attachSlot(n);
 
   const win = new BrowserWindow(Object.assign({
     width: 1280,
@@ -1175,8 +1189,20 @@ function openAccountWindow(n) {
   win.once('ready-to-show', reveal);
 
   win.maximize();
-  win.loadURL(APP_URL, { userAgent: CHROME_UA });
   windows.set(n, win);
+  // Publish this slot's session once its page is up. The cookie-'changed' listener in
+  // session-sync only fires on an interactive login or a rotation — cookies restored from
+  // disk on a normal launch arrive with no event — so a signed-in app that just starts up
+  // would otherwise never share its session. did-finish-load covers that; publish is
+  // hash-guarded, so the repeat loads a Google page does are no-ops.
+  win.webContents.on('did-finish-load', () => sessionSync.publish(n));
+  // Seed this slot from a session another app already established for the same account, if
+  // there is one, BEFORE the first load — so a signed-in slot paints authenticated instead
+  // of flashing a login screen. adoptBeforeLoad no-ops when the slot is already signed in or
+  // no shared session exists, so the ordinary path just loads immediately.
+  sessionSync.adoptBeforeLoad(n).finally(() => {
+    if (!win.isDestroyed()) win.loadURL(APP_URL, { userAgent: CHROME_UA });
+  });
   win.on('closed', () => {
     if (revealTimer) { clearTimeout(revealTimer); revealTimer = null; }
     windows.delete(n);
