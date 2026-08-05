@@ -34,49 +34,91 @@ const { execFile } = require('child_process');
 
 // --- keyring ---------------------------------------------------------------------------
 
-// One fixed identity for the shared key, so every app looks up the same secret.
-const KEY_ATTRS = ['application', 'electron-apps', 'key', 'session-sync'];
+// One fixed identity for the shared key, so every app looks up the same secret whatever
+// backend holds it.
+const KEY_ATTRS = ['application', 'electron-apps', 'key', 'session-sync']; // libsecret
 const KEY_LABEL = 'electron-apps session sync key';
+const KW_FOLDER = 'electron-apps';           // kwallet
+const KW_ENTRY = 'session-sync';
+const KC_SERVICE = 'electron-apps';          // macOS keychain
+const KC_ACCOUNT = 'session-sync';
 
-function secretToolLookup() {
+// Run a keyring CLI. Reports `missing` (the binary is not installed) distinctly from a plain
+// non-zero exit (present, but the key is absent or the store is locked), because the first
+// means "try the next backend" and the second can mean "this backend just has no key yet".
+function runTool(cmd, args, input) {
   return new Promise((resolve) => {
-    execFile('secret-tool', ['lookup', ...KEY_ATTRS], { encoding: 'utf8' }, (err, stdout) => {
-      // A miss exits non-zero with empty output; that is "no key yet", not a failure.
-      resolve(err || !stdout ? null : stdout);
-    });
+    let child;
+    try {
+      child = execFile(cmd, args, { encoding: 'utf8' }, (err, stdout) => {
+        resolve({ missing: !!(err && err.code === 'ENOENT'), failed: !!err, stdout: stdout || '' });
+      });
+    } catch (e) {
+      resolve({ missing: true, failed: true, stdout: '' });
+      return;
+    }
+    if (input != null) { try { child.stdin.end(input); } catch (e) {} }
   });
 }
 
-function secretToolStore(secret) {
-  return new Promise((resolve) => {
-    const child = execFile('secret-tool', ['store', '--label=' + KEY_LABEL, ...KEY_ATTRS],
-      (err) => resolve(!err));
-    child.stdin.end(secret);
-  });
-}
+// The keyring backends we know how to talk to, in preference order. Each is just a lookup
+// and a store over a CLI that ships with its platform; we never assume one is present or
+// working — init() proves it with a real round-trip before enabling anything.
+const KEYRING_BACKENDS = [
+  {
+    name: 'libsecret',
+    lookup: () => runTool('secret-tool', ['lookup', ...KEY_ATTRS]),
+    store: (b64) => runTool('secret-tool', ['store', '--label=' + KEY_LABEL, ...KEY_ATTRS], b64),
+  },
+  {
+    name: 'kwallet',
+    lookup: () => runTool('kwallet-query', ['-f', KW_FOLDER, '-r', KW_ENTRY, 'kdewallet']),
+    store: (b64) => runTool('kwallet-query', ['-f', KW_FOLDER, '-w', KW_ENTRY, 'kdewallet'], b64),
+  },
+  {
+    name: 'keychain', // macOS
+    lookup: () => runTool('security', ['find-generic-password', '-s', KC_SERVICE, '-a', KC_ACCOUNT, '-w']),
+    store: (b64) => runTool('security', ['add-generic-password', '-U', '-s', KC_SERVICE, '-a', KC_ACCOUNT, '-w', b64]),
+  },
+];
 
-// The shared key, or null if the keyring cannot provide one (→ feature disabled). Created
-// once on first use. The read-after-write guards the small race where two apps start
-// together and both generate a key: whoever wrote last wins, and everyone re-reads that one
-// canonical value, so they converge rather than encrypting with divergent keys.
+const parseKey = (s) => {
+  try { const k = Buffer.from(String(s || '').trim(), 'base64'); return k.length === 32 ? k : null; }
+  catch (e) { return null; }
+};
+
+// Which backend ended up holding the key, for the startup log.
+let keyBackendName = null;
+
+// The shared key, or null if no backend on THIS machine can hold one — in which case the
+// feature stays off. We do not decide by platform or by probing for a binary; we find out by
+// using it. First, adopt a key any backend already holds. Otherwise create one and confirm
+// it reads back: a backend whose binary is absent, whose store is locked, or that silently
+// drops the write fails that round-trip and is passed over. The re-read also settles the race
+// where two apps start together — each adopts whatever value is canonical afterwards, so they
+// converge rather than encrypting with divergent keys.
 let keyPromise = null;
 function getKey() {
-  if (!keyPromise) {
-    keyPromise = (async () => {
-      let b64 = await secretToolLookup();
-      if (!b64) {
-        const fresh = crypto.randomBytes(32).toString('base64');
-        if (!(await secretToolStore(fresh))) return null;
-        b64 = (await secretToolLookup()) || fresh;
-      }
-      try {
-        const key = Buffer.from(b64.trim(), 'base64');
-        return key.length === 32 ? key : null;
-      } catch (e) {
-        return null;
-      }
-    })().catch(() => null);
-  }
+  if (keyPromise) return keyPromise;
+  keyPromise = (async () => {
+    for (const be of KEYRING_BACKENDS) {
+      const r = await be.lookup();
+      if (r.missing) continue;
+      const key = parseKey(r.stdout);
+      if (key) { keyBackendName = be.name; return key; }
+    }
+    for (const be of KEYRING_BACKENDS) {
+      const probe = await be.lookup();
+      if (probe.missing) continue; // backend binary not installed
+      const fresh = crypto.randomBytes(32).toString('base64');
+      const stored = await be.store(fresh);
+      if (stored.missing || stored.failed) continue;
+      const back = await be.lookup();
+      const key = parseKey(back.stdout); // any valid 32-byte value proves the backend works
+      if (key) { keyBackendName = be.name; return key; }
+    }
+    return null;
+  })().catch(() => null);
   return keyPromise;
 }
 
@@ -337,11 +379,14 @@ async function init(context) {
   const key = await getKey();
   enabled = !!key;
   if (!enabled) {
-    log('keyring unavailable — single sign-on across apps is off (each app signs in on its own)');
+    // No working keyring on this machine — the honest outcome of "we can't know the
+    // capabilities": the feature turns itself off rather than storing a session in the clear.
+    log('no working keyring backend (tried ' + KEYRING_BACKENDS.map((b) => b.name).join(', ') +
+      ') — single sign-on across apps is off; each app signs in on its own');
     return;
   }
   startWatching();
-  log('ready');
+  log('ready (keyring: ' + keyBackendName + ')');
 }
 
 module.exports = { init, attachSlot, adoptBeforeLoad, publish };
