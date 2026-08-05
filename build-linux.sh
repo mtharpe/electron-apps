@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
-# Build & install the standalone Google apps (Gmail, Calendar, Tasks, Keep) on Linux.
+# Build & install the standalone Google apps on Linux. Which apps is up to you — see
+# services.conf for the full set, or run --list.
 #
-# Usage:  ./build-linux.sh            # build all, install under ~/.local, register launchers
+# Usage:  ./build-linux.sh                  # pick from a menu (all, if not run in a terminal)
+#         ./build-linux.sh gmail keep       # just those; name by short key, slug or full name
+#         ./build-linux.sh --all            # everything, no prompt
+#         ./build-linux.sh --list           # show what's available
+#         ./build-linux.sh --uninstall      # remove everything this installed
+#         ./build-linux.sh --uninstall keep # remove just those
 #         PREFIX=~/.local ./build-linux.sh
 #         ARCH=arm64 ./build-linux.sh
-#         ./build-linux.sh --uninstall
+#         ICON_THEME=Papirus-Dark ./build-linux.sh   # default: whatever this machine uses
 #
 # Requires: node + npm. ImageMagick or python3-Pillow is used to build the icon-size
 # ladder; without either, a single full-size icon is installed instead.
@@ -28,17 +34,9 @@ case "${ARCH:-$(uname -m)}" in
 esac
 
 . "$DIR/services.conf"
-
-# Display name -> filesystem slug: "Google Calendar" -> "google-calendar". The slug is the
-# executable name, the symlink name, the .desktop FILENAME, the icon name AND the WM_CLASS
-# the desktop matches windows on, so they all agree by construction.
-#
-# The .desktop filename matching matters as much as StartupWMClass: Electron tags every
-# notification with a `desktop-entry` hint derived from the same name, and the desktop uses
-# that hint to decide which app a notification belongs to (its icon, and its entry in the
-# notification settings). Rename the file without renaming the slug and notifications
-# quietly lose their identity.
-slugify() { echo "$1" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-*//; s/-*$//'; }
+# Provides slugify(), list_services() and resolve_services() — shared with build.sh so the
+# two installers can't disagree about what an app is called.
+. "$DIR/select-services.sh"
 
 APPS_DIR="$PREFIX/share/applications"
 ICONS_DIR="$PREFIX/share/icons/hicolor"
@@ -55,8 +53,33 @@ refresh_caches() {
   command -v gtk-update-icon-cache   >/dev/null && gtk-update-icon-cache -qtf "$ICONS_DIR" 2>/dev/null || true
 }
 
-if [ "${1:-}" = "--uninstall" ]; then
-  for entry in "${SERVICES[@]}"; do
+usage() { sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; }
+
+UNINSTALL=0
+WANTED=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --uninstall) UNINSTALL=1 ;;
+    # --all is how a script says "everything" without depending on whether it happens to
+    # have a terminal attached.
+    --all)       WANTED=("${SERVICES[@]%%|*}") ;;
+    --list)      list_services; exit 0 ;;
+    -h|--help)   usage; exit 0 ;;
+    -*)          echo "Unknown option: $1" >&2; usage >&2; exit 1 ;;
+    *)           WANTED[${#WANTED[@]}]="$1" ;;
+  esac
+  shift
+done
+
+if [ "$UNINSTALL" = 1 ]; then
+  # Uninstalling with no names removes everything, which is what it has always done and
+  # what someone typing --uninstall means. Prompting here would be a trap, not a courtesy.
+  if [ "${#WANTED[@]}" -eq 0 ]; then
+    SELECTED=("${SERVICES[@]}")
+  else
+    resolve_services ${WANTED[@]+"${WANTED[@]}"}
+  fi
+  for entry in "${SELECTED[@]}"; do
     IFS='|' read -r name _ _ _ _ <<< "$entry"
     slug="$(slugify "$name")"
     echo "==> Removing $name"
@@ -66,6 +89,8 @@ if [ "${1:-}" = "--uninstall" ]; then
   echo "==> Uninstalled. Per-account logins in ~/.config/<App Name> were left in place."
   exit 0
 fi
+
+resolve_services ${WANTED[@]+"${WANTED[@]}"}
 
 # Icons ship as macOS .icns (the original format of this project). Extract the largest
 # embedded PNG once into icons/png/ so adding a service still only means adding an .icns.
@@ -95,6 +120,174 @@ if not best:
     sys.exit("no embedded PNG found in " + src)
 open(dst, 'wb').write(best[1])
 PY
+}
+
+# The machine's icon theme, so an installed app can use the icon the user's theme provides
+# for it rather than the art bundled here. GNOME keeps it in gsettings; KDE in kdeglobals.
+# hicolor is the spec's mandatory fallback and is what "no answer" means.
+icon_theme_name() {
+  local t=""
+  if command -v gsettings >/dev/null 2>&1; then
+    t="$(gsettings get org.gnome.desktop.interface icon-theme 2>/dev/null | tr -d "'" || true)"
+  fi
+  if [ -z "$t" ] && [ -f "$HOME/.config/kdeglobals" ]; then
+    t="$(sed -n 's/^Theme=//p' "$HOME/.config/kdeglobals" 2>/dev/null | head -1 || true)"
+  fi
+  [ -n "$t" ] && echo "$t" || echo hicolor
+}
+
+# Print the file the icon theme (or anything it inherits) offers for <name>, or nothing.
+# Implements the freedesktop lookup well enough for app icons: search the theme, then its
+# Inherits chain, then hicolor, preferring scalable SVG and otherwise the largest raster.
+resolve_themed_icon() {
+  python3 - "$1" "$2" <<'PY' 2>/dev/null || true
+import os, re, sys
+from configparser import RawConfigParser
+
+name, theme = sys.argv[1], sys.argv[2]
+
+def icon_dirs():
+    out, seen = [], set()
+    home = os.environ.get('XDG_DATA_HOME') or os.path.expanduser('~/.local/share')
+    cands = [os.path.join(home, 'icons'), os.path.expanduser('~/.icons')]
+    for d in (os.environ.get('XDG_DATA_DIRS') or '/usr/local/share:/usr/share').split(':'):
+        if d:
+            cands.append(os.path.join(d, 'icons'))
+    for d in cands:
+        if os.path.isdir(d) and d not in seen:
+            seen.add(d)
+            out.append(d)
+    return out
+
+DIRS = icon_dirs()
+
+def inherits(t):
+    for d in DIRS:
+        idx = os.path.join(d, t, 'index.theme')
+        if os.path.isfile(idx):
+            cp = RawConfigParser(strict=False)
+            try:
+                cp.read(idx, encoding='utf-8')
+            except Exception:
+                continue
+            if cp.has_option('Icon Theme', 'Inherits'):
+                return [x.strip() for x in cp.get('Icon Theme', 'Inherits').split(',') if x.strip()]
+    return []
+
+# Breadth-first through the inheritance graph; hicolor last, as the spec requires.
+order, queue, seen = [], [theme], set()
+while queue:
+    t = queue.pop(0)
+    if t in seen:
+        continue
+    seen.add(t)
+    order.append(t)
+    queue.extend(inherits(t))
+if 'hicolor' not in order:
+    order.append('hicolor')
+
+def declared_dirs(t):
+    """The subdirectories a theme says it has, with each one's size and type.
+
+    Reading index.theme rather than walking the tree is not just faster, it is the only
+    thing that works: themes routinely symlink a subdirectory into a sibling theme
+    (Colloid-Dark/apps/scalable -> ../../Colloid-Light/apps/scalable), and os.walk does
+    not follow symlinks, so a walk silently misses those icons and falls through to
+    hicolor -- the exact opposite of what the desktop resolves.
+    """
+    for d in DIRS:
+        idx = os.path.join(d, t, 'index.theme')
+        if not os.path.isfile(idx):
+            continue
+        cp = RawConfigParser(strict=False)
+        try:
+            cp.read(idx, encoding='utf-8')
+        except Exception:
+            continue
+        subs = []
+        for key in ('Directories', 'ScaledDirectories'):
+            if cp.has_option('Icon Theme', key):
+                subs += [x.strip() for x in cp.get('Icon Theme', key).split(',') if x.strip()]
+        info = {}
+        for sub in subs:
+            size, typ = 0, 'Threshold'
+            if cp.has_section(sub):
+                try:
+                    size = cp.getint(sub, 'Size', fallback=0)
+                except Exception:
+                    size = 0
+                typ = cp.get(sub, 'Type', fallback='Threshold')
+            info[sub] = (size, typ)
+        return subs, info
+    return [], {}
+
+def walked_dirs(root):
+    """Fallback for a theme with no usable index.theme: look at what is actually there."""
+    subs, seen = [], set()
+    for dirpath, _, _ in os.walk(root, followlinks=True):
+        real = os.path.realpath(dirpath)
+        if real in seen:          # a self-referential symlink would otherwise spin forever
+            continue
+        seen.add(real)
+        rel = os.path.relpath(dirpath, root)
+        subs.append('' if rel == '.' else rel)
+    return subs
+
+for t in order:
+    subs, info = declared_dirs(t)
+    best, best_score = None, -1
+    for d in DIRS:
+        root = os.path.join(d, t)
+        if not os.path.isdir(root):
+            continue
+        for sub in (subs or walked_dirs(root)):
+            size, typ = info.get(sub, (0, 'Threshold'))
+            if not size:
+                m = re.search(r'(\d+)x\1', sub)
+                size = int(m.group(1)) if m else 0
+            for ext in ('.svg', '.png'):
+                p = os.path.join(root, sub, name + ext)
+                if not os.path.isfile(p):
+                    continue
+                # Scalable beats any bitmap: we re-render to 256px anyway, so vector is
+                # strictly better than whatever fixed size the theme happens to ship.
+                s = 10_000 if (ext == '.svg' or typ == 'Scalable') else size
+                if s > best_score:
+                    best, best_score = p, s
+    # First theme in the chain that has it wins -- that is what the desktop will show.
+    # The theme is reported alongside the path because the winner is often NOT the theme
+    # asked for: the chain ends at hicolor, where this installer put its own icons, and
+    # crediting the user's theme for those would be a lie.
+    if best:
+        print(t + '|' + best)
+        break
+PY
+}
+
+# Render <src> (SVG or raster) to a <size>px PNG at <dst>. Returns non-zero if nothing on
+# this machine can do the conversion, so callers can fall back to the bundled art.
+render_icon() {
+  local src="$1" dst="$2" size="$3" im
+  if command -v magick >/dev/null 2>&1 || command -v convert >/dev/null 2>&1; then
+    im="$(command -v magick || command -v convert)"
+    # -background none keeps SVG transparency; harmless for raster sources.
+    "$im" -background none "$src" -resize "${size}x${size}" "$dst" 2>/dev/null && return 0
+  fi
+  case "$src" in
+    *.svg)
+      command -v rsvg-convert >/dev/null 2>&1 &&
+        rsvg-convert -w "$size" -h "$size" -o "$dst" "$src" 2>/dev/null && return 0
+      ;;
+    *)
+      python3 - "$src" "$dst" "$size" <<'PY' 2>/dev/null && return 0
+import sys
+from PIL import Image
+src, dst, size = sys.argv[1], sys.argv[2], int(sys.argv[3])
+Image.open(src).convert('RGBA').resize((size, size), Image.LANCZOS).save(dst)
+PY
+      ;;
+  esac
+  return 1
 }
 
 # Install <src png> as the themed icon <slug>, at every size the desktop looks for.
@@ -164,7 +357,14 @@ PY
 mkdir -p "$PREFIX/lib" "$PREFIX/bin" "$APPS_DIR" "$ICONS_DIR"
 rm -rf build && mkdir -p build
 
-for entry in "${SERVICES[@]}"; do
+# Whatever icon theme THIS machine is set to — read at install time, never assumed. Export
+# ICON_THEME to build against a different one (useful when installing for another user's
+# setup, or to check what a theme would look like without switching to it).
+# Resolved once: the theme cannot change halfway through a build.
+ICON_THEME="${ICON_THEME:-$(icon_theme_name)}"
+echo "==> Icon theme: $ICON_THEME"
+
+for entry in "${SELECTED[@]}"; do
   IFS='|' read -r name icon url bid categories <<< "$entry"
   slug="$(slugify "$name")"
   echo "==> Building $name"
@@ -199,7 +399,28 @@ for entry in "${SERVICES[@]}"; do
   # Prefer the 256px render over the 1024px source: Electron sends the icon to the
   # notification daemon as raw pixels (an image-data hint), so a full-size original means
   # pushing 4MB of uncompressed RGBA across the bus for every single notification.
-  if [ -f "$ICONS_DIR/256x256/apps/$slug.png" ]; then
+  #
+  # And prefer the ICON THEME's version of this app over the art bundled here, when the
+  # user's theme offers one. The .desktop file already gets this for free — `Icon=<slug>`
+  # is a name, which the desktop resolves through the active theme — but this file is a
+  # path handed straight to Electron, so it would otherwise be the one place the app
+  # ignores the theme and showed bundled art in every notification banner.
+  #
+  # Note this only reads the theme; the hicolor install above is left alone deliberately.
+  # hicolor is the spec's fallback, so our own icon must stay there for the case where the
+  # user later switches to a theme that has never heard of these apps.
+  themed="" themed_theme=""
+  if [ "$ICON_THEME" != "hicolor" ]; then
+    found="$(resolve_themed_icon "$slug" "$ICON_THEME")"
+    if [ -n "$found" ]; then
+      themed_theme="${found%%|*}"
+      themed="${found#*|}"
+    fi
+  fi
+  if [ -n "$themed" ] && render_icon "$themed" "$staged/resources/app-icon.png" 256; then
+    echo "    icon: $themed_theme (${themed##*/})"
+  elif [ -f "$ICONS_DIR/256x256/apps/$slug.png" ]; then
+    [ -n "$themed" ] && echo "    note: found $themed but could not render it — using the bundled icon"
     cp "$ICONS_DIR/256x256/apps/$slug.png" "$staged/resources/app-icon.png"
   else
     cp "$png" "$staged/resources/app-icon.png"
@@ -231,7 +452,8 @@ restore_pkg
 trap - EXIT INT TERM HUP PIPE
 refresh_caches
 
-echo "==> Done. Launch from your app menu, or run e.g. 'gmail' from a shell."
+first_slug="$(slugify "$(_entry_name "${SELECTED[0]}")")"
+echo "==> Done. Launch from your app menu, or run e.g. '$first_slug' from a shell."
 case ":$PATH:" in
   *":$PREFIX/bin:"*) ;;
   *) echo "    note: $PREFIX/bin is not on your PATH — add it to launch from a shell." ;;
