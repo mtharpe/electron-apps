@@ -263,6 +263,29 @@ bundled icon — which is why the bundled icons are still installed into `hicolo
 your theme wins. That fallback has to stay: switch to a theme that has never heard of these
 apps and it is the only thing standing between you and a blank icon.
 
+##### When your theme has no icon for an app
+
+Themes only cover apps they know about. Tidal is a good example: Colloid ships nothing for
+it, so the lookup falls through to `hicolor` and you get this repo's copy of Tidal's own
+artwork — correct, but visibly not part of the icon set around it.
+
+`icons/theme/<Theme>/` holds icons authored to match a specific theme, for exactly that
+case. They are **not** installed by the build, because writing into somebody else's icon
+theme is not the installer's business. Copy one in yourself:
+
+```bash
+cp icons/theme/Colloid/tidal.svg ~/.local/share/icons/Colloid-Light/apps/scalable/
+gtk-update-icon-cache -qtf ~/.local/share/icons/Colloid-Dark
+./build-linux.sh tidal        # so the notification icon picks it up too
+```
+
+Note the destination is **Colloid-Light** even when you run Colloid-Dark: the dark variant
+symlinks `apps/scalable` at its light sibling, so that is the real location and writing
+there covers both.
+
+Re-run this after updating or reinstalling the theme — a theme update overwrites its own
+directory and takes the added icon with it.
+
 Nothing here is specific to any one theme — the installer reads whatever the machine is set
 to, per install. On a box with no theme icons for these apps every one falls back to
 `hicolor` and the build says so:
