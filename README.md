@@ -454,14 +454,19 @@ outranks the page-derived title below. Leave it blank and a mapped slot takes it
 profile's own name, which is the point of the mapping — the two stay consistent without
 typing anything.
 
-Names and mappings are **shared by all the apps** (`~/.config/google-standalone-apps/accounts.json`,
-or `~/Library/Application Support/google-standalone-apps/` on macOS) — "Account 2 is Work" is
-a fact about your Google accounts, not about Gmail-the-app, so you name them once. Only the
+Names and mappings are **shared by all the apps** (`~/.config/electron-apps/accounts.json`,
+or `~/Library/Application Support/electron-apps/` on macOS) — "Account 2 is Work" is
+a fact about your accounts, not about Gmail-the-app, so you name them once. Only the
 labels and the routing are shared; the sessions stay isolated per app exactly as before. Each
 app watches the file, so a name set in Gmail reaches a running Calendar without restarting it,
-and saves write only the slots that changed so one app can't revert another's edit. An older
-per-app `<userData>/accounts.json` is merged in on first run (anything already in the shared
-file wins) and renamed to `accounts.json.migrated`.
+and saves write only the slots that changed so one app can't revert another's edit.
+
+Two older locations are merged in on first run, gaps only — anything already in the shared
+file was set later and wins. This app's pre-sharing `<userData>/accounts.json` is renamed to
+`accounts.json.migrated` once folded in. The older shared directory
+(`google-standalone-apps/`, from when every app here was a Google app) is **not** renamed
+away: apps are installed individually, so rebuilding one of them must not strand the rest.
+It stops being consulted once every app has been rebuilt, and can be deleted then.
 
 Unlike the account windows, this window is an ordinary hardened renderer
 (`contextIsolation: true`, `sandbox: true`) with its own preload exposing exactly three
@@ -488,7 +493,7 @@ the icon name and the window's `WM_CLASS` — so they all line up by constructio
 A name set in **Configure Accounts…** (or inherited from the mapped Chrome profile) wins.
 With neither, a global `web-contents-created` hook titles each window with the account/org name and
 re-applies it on every load (suppressing Google's own long page title). Gmail & Calendar
-expose the org name in their page title (*Spectro Cloud*, *Google Calendar*, …); **Keep**
+expose the org name in their page title (*Acme Corp*, *Google Calendar*, …); **Keep**
 and **Tasks** have no org name in their titles, so they fall back to the signed-in **email**
 read off the account avatar; **Messages** exposes neither, so it keeps its page title.
 
