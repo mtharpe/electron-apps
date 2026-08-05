@@ -234,9 +234,17 @@ Design points that are load-bearing, not incidental:
   right account. Keying by identity means an app only ever adopts a session for the email
   that slot is meant to be.
 - **Encrypted with a key in the OS keyring**, not Electron `safeStorage` — safeStorage's key
-  is scoped per app name, so one app cannot decrypt another's blob (measured). The shared key
-  lives under a fixed libsecret label via `secret-tool`. Fail-closed: no keyring → feature off,
-  never a plaintext fallback.
+  is scoped per app name, so one app cannot decrypt another's blob (measured). The keyring is
+  chosen by capability, not platform: `getKey()` tries libsecret (`secret-tool`), KDE Wallet
+  (`kwallet-query`), and macOS Keychain (`security`) in order, and enables the feature only
+  for a backend that survives a real store→lookup→compare round-trip. A backend whose binary
+  is absent, whose store is locked, or that silently drops the write fails that check and is
+  passed over; if none passes, the feature is off. This is the answer to "we can't know the
+  capabilities on someone else's machine" — it finds out by using it, never by assuming.
+  Only libsecret is verified on real hardware here; kwallet and keychain are written to spec
+  and made safe by the round-trip, which never reports success it didn't observe (macOS note:
+  the `security -w` key is briefly visible in `ps` — a stdin path would be better once someone
+  can verify it on real macOS).
 - **Publish on `did-finish-load`, not only on cookie-`changed`.** Cookies restored from disk
   on a normal launch arrive with no `changed` event, so a signed-in app that just starts up
   would never share its session. The cookie listener still covers interactive login and
