@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <!-- Colloid-style TIDAL. Upstream Colloid ships no tidal icon; this follows the same
+       construction as the hand-made google-keep.svg in this theme: Colloid's 56.002 tile
+       at rx 13.002, brand colour, white glyph, and Colloid's two shading overlays.
+       Glyph geometry is derived from TIDAL's own app icon (four 87px diamonds on a 418px
+       tile) rather than redrawn by eye. -->
+  <rect width="56.002" height="56.002" x="4" y="3.969" fill="#33333b" rx="13.002" ry="13.002"/>
+  <path fill="#fff" d="M20.278 21.118L26.106 26.946L20.278 32.774L14.45 26.946Z"/>
+  <path fill="#fff" d="M31.934 21.118L37.762 26.946L31.934 32.774L26.106 26.946Z"/>
+  <path fill="#fff" d="M43.59 21.118L49.418 26.946L43.59 32.774L37.762 26.946Z"/>
+  <path fill="#fff" d="M31.934 32.908L37.762 38.736L31.934 44.564L26.106 38.736Z"/>
+  <!-- Colloid tile shading -->
+  <path fill="#fff" opacity=".15" d="M3.998 18.004v-1C3.998 9.801 9.798 4 17.002 4h29.996c7.203 0 13.004 5.8 13.004 13.004v1c0-7.203-5.8-13.002-13.004-13.002H17.002A12.975 12.975 0 0 0 3.998 18.004"/>
+  <path fill="#000" opacity=".15" d="M3.998 45.998v1c0 7.203 5.8 13.004 13.004 13.004h29.996c7.203 0 13.004-5.8 13.004-13.004v-1c0 7.203-5.8 13.002-13.004 13.002H17.002A12.975 12.975 0 0 1 3.998 45.998"/>
+</svg>
