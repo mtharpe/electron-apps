@@ -36,6 +36,7 @@ desktop app, is what most of `main.js` and `preload.js` are for.
 | `docs/` | README images, generated from `icons/png/`. |
 | `styles/<slug>.css` | Optional per-app CSS, injected on that app's own host. `styles/gmail.css` is the shipped example. |
 | `icons/png/<icon>.png` | App artwork. Tidal's came from its own web app manifest, which is where to look for any site's icon. |
+| `icons/theme/<Theme>/` | Icons hand-authored to match a specific icon theme, for apps that theme has nothing for. Not installed by the build — copied in by hand, and re-copied after a theme update. |
 
 ---
 
