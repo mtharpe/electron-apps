@@ -53,7 +53,7 @@ function applyGmailNormalization(wc) {
   });
 }
 
-// Window title = JUST the account/org name (e.g. "Spectro Cloud", "Gmail") so each account's
+// Window title = JUST the account/org name (e.g. "Acme Corp", "Gmail") so each account's
 // window is easy to pick out in ⌘-Tab / Mission Control / the Window menu. Google puts the org
 // name in the page title for Gmail & Calendar; Keep/Tasks don't, so we fall back to the
 // signed-in email (read from the account avatar), then to whatever the page title is.
@@ -433,12 +433,12 @@ const PROFILE_NONE = 'none';
 
 const accounts = new Map(); // slot -> { name, chromeProfile, email }
 
-// Deliberately NOT under userData: "Account 2 is Work" is a fact about the user's Google
-// accounts, not about Gmail-the-app, so all four apps share one file rather than making the
-// user name the same accounts four times. (Appearance stays per app — that one really is a
-// per-window preference.) The sessions themselves stay isolated per app as before; this
-// shares the labels and the routing, nothing else.
-const ACCOUNTS_DIR = path.join(app.getPath('appData'), 'google-standalone-apps');
+// Deliberately NOT under userData: "Account 2 is Work" is a fact about the user's accounts,
+// not about Gmail-the-app, so every app shares one file rather than making the user name the
+// same accounts once per app. (Appearance stays per app — that one really is a per-window
+// preference.) The sessions themselves stay isolated per app as before; this shares the
+// labels and the routing, nothing else.
+const ACCOUNTS_DIR = path.join(app.getPath('appData'), 'electron-apps');
 
 function accountsFile() {
   return path.join(ACCOUNTS_DIR, 'accounts.json');
@@ -447,6 +447,11 @@ function accountsFile() {
 // Where this app's own copy used to live, before the file was shared.
 function legacyAccountsFile() {
   return path.join(app.getPath('userData'), 'accounts.json');
+}
+
+// Where the shared file lived while every app in the set was a Google app.
+function legacySharedAccountsFile() {
+  return path.join(app.getPath('appData'), 'google-standalone-apps', 'accounts.json');
 }
 
 function parseAccounts(text) {
@@ -475,21 +480,31 @@ function loadAccounts() {
   migrateLegacyAccounts();
 }
 
-// Fold this app's old per-app file into the shared one. Deliberately a merge rather than a
-// "shared file missing? adopt mine": the four apps start in any order, and the first of them
-// to detect an address creates the shared file — so a plain existence check would let
-// whichever app happened to start first discard names set in another.
+// Fold older locations into the current shared file. Deliberately a merge rather than a
+// "shared file missing? adopt mine": the apps start in any order, and the first of them to
+// detect an address creates the shared file — so a plain existence check would let whichever
+// app happened to start first discard names set in another.
 //
-// Only gaps are filled; anything already in the shared file was set after the split and wins.
-// The legacy file is then renamed rather than deleted, both so this runs once per app and so
-// the old values are still there if the merge ever gets it wrong.
+// Newest scheme first, so a gap is filled from the most recent source that has a value.
 function migrateLegacyAccounts() {
-  const file = legacyAccountsFile();
+  // The old SHARED file is never renamed away. Apps are installed individually now, so
+  // rebuilding just one of them must not strand the others — anything still running the old
+  // build keeps reading that file, and leaving it costs nothing because the merge only ever
+  // fills gaps. It stops being consulted once every app has been rebuilt.
+  mergeAccountsFrom(legacySharedAccountsFile(), false);
+  // This app's pre-sharing copy, which only it can own — safe to retire once merged.
+  mergeAccountsFrom(legacyAccountsFile(), true);
+}
+
+// Only gaps are filled; anything already in the shared file was set later and wins. When
+// `retire` is set the source is renamed rather than deleted, both so it runs once and so the
+// old values are still there if the merge ever gets it wrong.
+function mergeAccountsFrom(file, retire) {
   let legacy;
   try {
     legacy = parseAccounts(fs.readFileSync(file, 'utf8'));
   } catch {
-    return; // no per-app file (the normal case from here on)
+    return; // not present (the normal case from here on)
   }
   const touched = [];
   for (const [n, old] of legacy) {
@@ -511,11 +526,13 @@ function migrateLegacyAccounts() {
     if (changed) { accounts.set(n, merged); touched.push(n); }
   }
   if (touched.length) persistSlots(touched);
-  try { fs.renameSync(file, file + '.migrated'); } catch (e) { /* leave it; the merge is idempotent */ }
+  if (retire) {
+    try { fs.renameSync(file, file + '.migrated'); } catch (e) { /* leave it; the merge is idempotent */ }
+  }
 }
 
 // Write only the slots that actually changed, merging into whatever is on disk right now.
-// With four apps sharing one file, serializing this process's whole in-memory copy would
+// With several apps sharing one file, serializing this process's whole in-memory copy would
 // let a long-running app quietly revert a change another app made after it started.
 function persistSlots(slotNumbers) {
   let onDisk = {};
