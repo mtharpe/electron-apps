@@ -24,6 +24,13 @@ fi
 ARCH="${ARCH:-$([ "$(uname -m)" = "x86_64" ] && echo x64 || echo arm64)}"
 
 # service | icon-name | url | bundle-id | categories (categories are Linux-only, unused here)
+# @electron/packager downloads the Electron dist itself, and defaults to the official
+# electron/electron releases — where this project's Electron does not exist. package.json
+# pins castlabs' Widevine-enabled fork, whose version carries a +wvcus suffix, so the
+# default lookup 404s. Point the downloader at the fork; the asset names are otherwise
+# identical. Overridable, for anyone who mirrors these internally.
+export ELECTRON_MIRROR="${ELECTRON_MIRROR:-https://github.com/castlabs/electron-releases/releases/download/}"
+
 . "$DIR/services.conf"
 # Shared with build-linux.sh so both installers agree on what an app can be called.
 . "$DIR/select-services.sh"
@@ -46,7 +53,11 @@ resolve_services ${WANTED[@]+"${WANTED[@]}"}
 # Install build deps on first run (electron + packager are devDependencies).
 if [ ! -d node_modules ]; then
   echo "==> Installing build dependencies (electron + packager)..."
-  npm install --save-dev electron @electron/packager
+  # `npm install` with no package names, deliberately: package.json pins Electron to
+  # castlabs' Widevine-enabled fork, and naming `electron` here would resolve to stock
+  # Electron from the registry and quietly replace it. DRM apps would then build fine and
+  # simply never play.
+  npm install
 fi
 
 rm -rf build && mkdir -p build
