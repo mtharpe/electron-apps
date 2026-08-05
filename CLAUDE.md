@@ -32,6 +32,7 @@ desktop app, is what most of `main.js` and `preload.js` are for.
 | `main.js` | Main process: per-account windows, header spoofing, link routing, notifications, titles, load recovery. |
 | `preload.js` | Runs in the page's main world: the stealth layer + notification mirror. |
 | `accounts.html` / `accounts-preload.js` | The Configure Accounts window (ordinary hardened renderer, not the stealth one). |
+| `session-sync.js` | Single sign-on: shares an established Google session between the apps, encrypted, keyed by email. Fail-closed if no keyring. |
 | `icons/*.icns`, `icons/png/` | App artwork. The Linux build extracts PNG from `.icns` automatically. |
 | `docs/` | README images, generated from `icons/png/`. |
 | `styles/<slug>.css` | Optional per-app CSS, injected on that app's own host. `styles/gmail.css` is the shipped example. |
@@ -219,6 +220,35 @@ Nothing in Electron retries a failed navigation. `main.js` adds a backoff retry 
 
 `ERR_ABORTED` (-3) is an ordinary superseded navigation, not a failure — retrying on it
 fights the page.
+
+### Single sign-on (session-sync.js)
+
+Shares an *established* Google web session between the apps so each account is signed in
+once, not once per app. It does not create sessions or bypass 2FA — it copies auth cookies
+between the user's own apps.
+
+Design points that are load-bearing, not incidental:
+
+- **Keyed by `sha256(email)`, never by slot.** Slot N in two apps is *supposed* to be the
+  same account, but if it isn't, keying by slot would let one app log another out of the
+  right account. Keying by identity means an app only ever adopts a session for the email
+  that slot is meant to be.
+- **Encrypted with a key in the OS keyring**, not Electron `safeStorage` — safeStorage's key
+  is scoped per app name, so one app cannot decrypt another's blob (measured). The shared key
+  lives under a fixed libsecret label via `secret-tool`. Fail-closed: no keyring → feature off,
+  never a plaintext fallback.
+- **Publish on `did-finish-load`, not only on cookie-`changed`.** Cookies restored from disk
+  on a normal launch arrive with no `changed` event, so a signed-in app that just starts up
+  would never share its session. The cookie listener still covers interactive login and
+  rotation.
+- **Gather cookies with `get({})` then filter, never `get({domain})`.** The domain query
+  misses host-only auth cookies on subdomains (accounts./mail.google.com) — measured 17 vs 43,
+  and a 17-cookie graft does NOT sign you in. This one shipped as a bug in the first draft and
+  was only caught by loading Gmail and checking the result, not by counting cookies.
+
+Test the round-trip without touching a real profile: run `session-sync.js`'s `adoptBeforeLoad`
+against the real store file but into a scratch `--user-data-dir`, then load the app and check
+`signedIn`. A cookie count is not enough — verify the page is actually authenticated.
 
 ### DRM (why Electron is a fork here)
 

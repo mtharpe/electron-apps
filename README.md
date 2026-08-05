@@ -111,9 +111,11 @@ defeating embedded-browser login blocks — Google's included.
 <tr>
 <td valign="top">
 
-**Multiple accounts, truly isolated**
+**Multiple accounts, truly isolated — signed in once**
 Every window has its own persistent session and cookie jar, so each can be a different
-account on the same service. Open as many as you like.
+account on the same service. Sign into an account in one app and the others adopt that
+session, so it's one login per account, not one per app. See
+[Single sign-on across the apps](#single-sign-on-across-the-apps).
 
 </td>
 <td valign="top">
@@ -318,6 +320,35 @@ pick that up.
   **fully isolated session** — sign a different Google account into each. Logins persist
   per slot across restarts.
 - Each app keeps its own session store, so you sign in per app.
+
+### Single sign-on across the apps
+The apps keep isolated sessions on purpose — that's what lets each window be a different
+account — but it also meant signing into the *same* account once per app: five Google apps
+times three accounts is fifteen logins, each with 2FA.
+
+So an established session is shared. Sign into an account in one app, and when another app
+opens a slot for that same account it adopts the session and comes up already authenticated.
+One login per account.
+
+What is and isn't shared:
+
+- **Only an established Google web session**, and only its auth cookies — nothing else in the
+  jar, no other site's cookies, no local data.
+- **Keyed by the signed-in email, not the slot number.** A slot accidentally signed into the
+  wrong account can't log a matching slot elsewhere out of the right one — an app only ever
+  adopts a session for the identity that slot is meant to be.
+- **Encrypted at rest** (AES-256-GCM) under a key kept in your OS keyring (libsecret /
+  gnome-keyring), never in a file. If the keyring is unavailable the feature disables itself
+  and nothing is ever written unencrypted — each app just signs in on its own as before.
+
+This does **not** create sessions, bypass 2FA, or read anything outside these apps. It moves
+an already-authenticated session between your own apps on your own machine. It also can't
+help with the *first* sign-in for an account — you still do that once, however you normally
+would.
+
+The shared store lives at `~/.config/electron-apps/sessions/` (Linux) /
+`~/Library/Application Support/electron-apps/sessions/` (macOS), one encrypted file per
+account, named by a hash of the email.
 
 ### Notifications
 - Turn on the service's own desktop notifications (e.g. Google Calendar → ⚙ Settings →
