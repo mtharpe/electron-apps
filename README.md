@@ -88,6 +88,40 @@ cd <repo>
 ./build.sh          # macOS; on Linux this dispatches to ./build-linux.sh
 ```
 
+### Choosing which apps to install
+
+This is one person's set of apps and you probably don't want all of it. Run the installer
+with no arguments and it asks:
+
+```
+Which apps do you want to install?
+
+    1) Gmail
+    2) Google Calendar
+    3) Google Tasks
+    4) Google Keep
+    5) Google Messages
+
+Numbers ("1 3"), names ("gmail keep"), or press Enter for all:
+```
+
+Or name them up front and skip the prompt. An app answers to its short key, its slug, or
+its full name, in any case:
+
+```bash
+./build-linux.sh gmail keep          # just these two
+./build-linux.sh "Google Keep"       # same app, long name
+./build-linux.sh --all               # everything, no prompt
+./build-linux.sh --list              # show the available names and what each one opens
+```
+
+Installing a subset leaves any app you already installed alone, so you can add one later
+without rebuilding the rest. With no terminal attached (CI, a pipe) the prompt is skipped
+and everything is built, so scripted builds don't hang waiting for an answer.
+
+**Adding your own:** `services.conf` is the catalogue both installers read. Append a line
+and drop a matching icon in `icons/` — nothing else needs to change.
+
 ### macOS
 
 `build.sh` will, on first run:
@@ -116,14 +150,18 @@ Launch from your desktop's app menu, or run `gmail` / `google-calendar` /
 `google-tasks` / `google-keep` / `google-messages` from a shell.
 
 ```bash
-./build-linux.sh                 # build + install every app in services.conf
+./build-linux.sh                   # pick from the menu (see above)
+./build-linux.sh gmail keep        # or name the apps outright
 PREFIX=/some/where ./build-linux.sh
-ARCH=arm64 ./build-linux.sh      # defaults to the host architecture
-./build-linux.sh --uninstall     # remove apps, launchers and icons
+ARCH=arm64 ./build-linux.sh        # defaults to the host architecture
+./build-linux.sh --uninstall       # remove every app, launcher and icon it installed
+./build-linux.sh --uninstall keep  # remove just that one
 ```
 
 `--uninstall` deliberately leaves your signed-in sessions
-(`~/.config/<App Name>/`) alone, so a rebuild doesn't cost you every login.
+(`~/.config/<App Name>/`) alone, so a rebuild doesn't cost you every login. With no names
+it removes everything — it does **not** prompt, because that is what someone typing
+`--uninstall` is asking for.
 
 ---
 
@@ -181,6 +219,7 @@ built with [`@electron/packager`](https://github.com/electron/packager).
 | `accounts.html` | The **Configure Accounts…** window: a name field and a Chrome profile dropdown per account slot. |
 | `accounts-preload.js` | Context-isolated bridge for that window — exposes load / save / close and nothing else. |
 | `services.conf` | The service list (`name \| icon \| url \| bundle-id \| categories`), shared by both build scripts so they can't drift. |
+| `select-services.sh` | Turns what the user asked for — names, menu numbers, `--all`, or nothing — into the set of services to build. Shared by both installers so they accept the same names. |
 | `build.sh` | macOS: builds/installs/signs every app in `services.conf`. Builds for the host arch (or `ARCH=universal`). On Linux it hands off to `build-linux.sh`. |
 | `build-linux.sh` | Linux: packages each service, installs under `$PREFIX`, writes `.desktop` files and the icon ladder, registers with the desktop. Also `--uninstall`. |
 | `icons/` | 1024px `.icns` app icons (macOS). |
