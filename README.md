@@ -1,92 +1,151 @@
-# Google Standalone Apps for macOS & Linux
+<div align="center">
 
-Turn **Gmail, Google Calendar, Google Tasks, Google Keep, and Google Messages** into real,
-standalone desktop apps — each with its own icon, its own Dock/taskbar identity, and
-**native desktop notifications** — fully independent of Chrome.
+<img src="docs/apps.png" alt="Gmail, Google Calendar, Google Tasks, Google Keep, Google Messages" width="600">
 
-Unlike Chrome PWAs, these are genuine separate applications. Unlike plain
-[Nativefier](https://github.com/nativefier/nativefier), they actually get **past Google's
-"this browser or app may not be secure" sign-in block**, and they deliver **real
-notification banners** (not just a sound).
+# Electron Apps
 
-> macOS: built and tested on Apple Silicon (arm64), macOS 26.
-> Linux: built and tested on x86_64, Fedora 44 / GNOME 49 (Wayland and X11).
+**Google's web apps as real desktop apps — on macOS and Linux.**
 
-| | macOS | Linux |
-|---|---|---|
-| Build | `./build.sh` | `./build-linux.sh` (or `./build.sh`, which dispatches) |
-| Installs to | `~/Applications/<Name>.app` | `~/.local/lib/<slug>` + a `.desktop` launcher |
-| Shortcut modifier | `⌘` | `Ctrl` |
+Own icon. Own taskbar identity. Real Google sign-in that isn't blocked.
+A separate isolated window per account. Native notification banners. No Chrome required.
+
+<p>
+<img alt="Platform: macOS and Linux" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-informational">
+<img alt="Electron 42" src="https://img.shields.io/badge/Electron-42-47848F?logo=electron&logoColor=white">
+<img alt="No dependencies beyond Node" src="https://img.shields.io/badge/runtime%20deps-none-success">
+<img alt="License MIT" src="https://img.shields.io/badge/license-MIT-green">
+</p>
+
+<sub>Not affiliated with or endorsed by Google.</sub>
+
+</div>
+
+---
+
+## The apps
+
+|  | App | Opens | Install name |
+|:--:|---|---|---|
+| <img src="docs/icons/gmail.png" width="40"> | **Gmail** | `mail.google.com` | `gmail` |
+| <img src="docs/icons/google-calendar.png" width="40"> | **Google Calendar** | `calendar.google.com` | `google-calendar` |
+| <img src="docs/icons/google-tasks.png" width="40"> | **Google Tasks** | `tasks.google.com` | `google-tasks` |
+| <img src="docs/icons/google-keep.png" width="40"> | **Google Keep** | `keep.google.com` | `google-keep` |
+| <img src="docs/icons/google-messages.png" width="40"> | **Google Messages** | `messages.google.com` | `google-messages` |
+
+Install all of them or **[just the ones you want](#choosing-which-apps-to-install)** — and
+[add your own](#add--change-a-service) in one line.
+
+---
+
+## Why this exists
+
+A Chrome PWA is still Chrome: it lives in a Chrome profile, dies when you sign out of that
+profile, and gives you one account per profile. A plain [Nativefier](https://github.com/nativefier/nativefier)
+wrapper gets you a standalone app that **Google refuses to sign you into** — the infamous
+*"This browser or app may not be secure."*
+
+|  | Chrome PWA | Nativefier | **This** |
+|---|:--:|:--:|:--:|
+| Independent of Chrome | ❌ | ✅ | ✅ |
+| Google sign-in works | ✅ | ❌ | ✅ |
+| Several accounts, isolated, side by side | ❌ | ❌ | ✅ |
+| Native notification banners | ✅ | ⚠️ | ✅ |
+| Own taskbar / Dock identity | ⚠️ | ✅ | ✅ |
+| Corporate SSO (Okta, Entra, …) completes in-app | ✅ | ❌ | ✅ |
+| Links open in your real browser, right profile | ❌ | ❌ | ✅ |
+
+---
+
+## Quick start
+
+```bash
+git clone https://github.com/mtharpe/electron-apps.git
+cd electron-apps
+./build.sh          # macOS; on Linux this dispatches to ./build-linux.sh
+```
+
+It asks which apps you want, builds them, and installs them. That's the whole setup —
+there is nothing to configure first and no runtime dependency beyond Node for the build.
+
+> **Requirements**
+> **macOS** — Node.js + npm (`brew install node`), Xcode command line tools (for `codesign`).
+> **Linux** — Node.js + npm, a notification daemon (GNOME, KDE, …) and `libnotify`.
+> Optional: ImageMagick **or** python3-Pillow to render the icon-size ladder.
 
 ---
 
 ## Features
 
-- **Standalone apps** — own icon, own Dock tile / taskbar entry, own app-switcher entry;
-  not "Google Chrome". On Linux each service gets its own launcher, its own icon and its
-  own `WM_CLASS`, so the apps never collapse into one taskbar group.
-- **Google sign-in works** — a stealth layer makes the embedded Chromium look like stock
-  desktop Chrome, defeating the embedded-browser login block.
-- **Multiple accounts, isolated** — every window uses its own persistent session
-  (separate cookie jar), so each window can be a different Google account. Open as many
-  as you like (`⌘N`, or the **Accounts** menu / `⌘1`–`⌘6`).
-- **Enterprise SSO works** — corporate Workspace sign-in that redirects to a third-party
-  identity provider (Okta, Microsoft Entra, Ping, Duo, …) completes **in-app**, even when
-  the IdP opens in a popup. Vanity SSO domains are configurable without a rebuild.
-- **Per-account window titles** — each window is titled with just the account/org name
-  (e.g. *Spectro Cloud*), so account windows are easy to tell apart in ⌘-Tab / Mission
-  Control / the **Window** menu.
-- **Consistent Gmail view** — Workspace Gmail's extra left **Mail/Chat/Meet/Spaces** rail
-  is hidden so every account looks like clean personal Gmail.
-- **Links open in your browser** — links that leave Google (in emails, Calendar events, …)
-  open in Chrome / your default browser, from **every** window — including secondary account
-  windows opened by the account switcher.
-- **Links land in the right Chrome profile** — each account window can be pinned to a Chrome
-  profile, so a link from your work account opens in your work profile instead of whichever
-  Chrome window happened to have focus. Accounts match themselves to the profile signed into
-  the same Google address, and **Accounts → Configure Accounts…** lets you rename accounts
-  and override the mapping.
-- **Native desktop notifications** — Calendar reminders / new-mail alerts show as real
-  banners (Notification Center on macOS; your desktop's notification daemon on Linux,
-  correctly attributed to the app with its own icon). See
-  [Notifications](#notifications) for exactly which paths are covered on Linux.
-- **All profiles stay live** — background account windows aren't throttled or suspended,
-  so every open profile keeps refreshing (Calendar data) and firing notifications, not
-  just the focused one. Windows also reload on wake-from-sleep to recover stale sessions.
-- **Light/dark window chrome** — the titlebar, the page and the pre-paint background all
-  follow the system light/dark setting, and **View ▸ Appearance** pins **Light** or **Dark**
-  when detection gets it wrong. The choice is saved per app and survives restarts; **System**
-  (the default) tracks the desktop live. Changing it offers a restart, because GTK only reads
-  the theme at startup and the titlebar can't be repainted in place.
-- **Maximized on launch** — every account window opens maximized.
-- **One instance per app** — launching a second copy focuses the running one instead of
-  starting a rival process fighting over the same session data.
-- **One-command build** — one script packages and installs every app in `services.conf`.
+<table>
+<tr>
+<td width="50%" valign="top">
 
----
+**Real apps, not tabs**
+Own icon, own Dock tile / taskbar entry, own app-switcher entry — not "Google Chrome". On
+Linux each app gets its own `WM_CLASS`, so they never collapse into one taskbar group.
 
-## Requirements
+</td>
+<td width="50%" valign="top">
 
-**macOS**
-- macOS (Apple Silicon / arm64 or Intel / x64)
-- [Node.js](https://nodejs.org) + npm — `brew install node`
-- Xcode command line tools (for `codesign`) — usually already present
+**Google sign-in works**
+A stealth layer makes the embedded Chromium indistinguishable from stock desktop Chrome,
+defeating the embedded-browser login block.
 
-**Linux**
-- A desktop with a notification daemon (GNOME, KDE, …) and `libnotify`
-- [Node.js](https://nodejs.org) + npm
-- Optional: ImageMagick **or** python3-Pillow, used to render the icon-size ladder.
-  Without either, a single unscaled icon is installed instead.
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+**Multiple accounts, truly isolated**
+Every window has its own persistent session and cookie jar, so each can be a different
+Google account. Open as many as you like.
+
+</td>
+<td valign="top">
+
+**Enterprise SSO completes in-app**
+Workspace sign-in that redirects to Okta, Entra, Ping, Duo and friends finishes inside the
+app, even when the IdP opens a popup. Vanity domains configurable without a rebuild.
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+**Links land in the right browser — and profile**
+Links that leave Google open in your real browser, and each account window can be pinned to
+a Chrome profile so work links open in your work profile.
+
+</td>
+<td valign="top">
+
+**Native notifications**
+Calendar reminders and new-mail alerts arrive as real banners, correctly attributed to the
+app with its own icon.
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+**Follows your desktop**
+Light/dark window chrome tracks the system setting (with a manual override), and the
+installed icons follow **your icon theme**, not this repo's artwork.
+
+</td>
+<td valign="top">
+
+**Stays out of the way**
+Maximized on launch, one instance per app, background windows never throttled, and windows
+recover on their own from a failed load or a wake-from-sleep with no network yet.
+
+</td>
+</tr>
+</table>
 
 ---
 
 ## Install / Build
-
-```bash
-git clone https://github.com/mtharpe/<repo>.git
-cd <repo>
-./build.sh          # macOS; on Linux this dispatches to ./build-linux.sh
-```
 
 ### Choosing which apps to install
 
@@ -127,7 +186,7 @@ and drop a matching icon in `icons/` — nothing else needs to change.
 `build.sh` will, on first run:
 
 1. `npm install` the build deps (`electron`, `@electron/packager`),
-2. package each service into a `.app`,
+2. package each selected service into a `.app`,
 3. copy them to `~/Applications`,
 4. ad-hoc code-sign each app (so macOS attributes notifications correctly).
 
@@ -145,6 +204,23 @@ right-click → **Options → Keep in Dock**.
 | `~/.local/bin/<slug>` | launcher symlink (run `gmail`, `google-calendar`, …) |
 | `~/.local/share/applications/<slug>.desktop` | app-menu entry |
 | `~/.local/share/icons/hicolor/*/apps/<slug>.png` | icons, 16px→512px |
+
+Launch from your desktop's app menu, or run `gmail` / `google-calendar` /
+`google-tasks` / `google-keep` / `google-messages` from a shell.
+
+```bash
+./build-linux.sh                   # pick from the menu (see above)
+./build-linux.sh gmail keep        # or name the apps outright
+PREFIX=/some/where ./build-linux.sh
+ARCH=arm64 ./build-linux.sh        # defaults to the host architecture
+./build-linux.sh --uninstall       # remove every app, launcher and icon it installed
+./build-linux.sh --uninstall keep  # remove just that one
+```
+
+`--uninstall` deliberately leaves your signed-in sessions
+(`~/.config/<App Name>/`) alone, so a rebuild doesn't cost you every login. With no names
+it removes everything — it does **not** prompt, because that is what someone typing
+`--uninstall` is asking for.
 
 #### Icons follow your icon theme
 
@@ -193,23 +269,6 @@ ICON_THEME=Papirus-Dark ./build-linux.sh
 Because this is resolved at **install** time, changing your icon theme later updates the
 menu and dash icons immediately, but not the notification icon — rerun the installer to
 pick that up.
-
-Launch from your desktop's app menu, or run `gmail` / `google-calendar` /
-`google-tasks` / `google-keep` / `google-messages` from a shell.
-
-```bash
-./build-linux.sh                   # pick from the menu (see above)
-./build-linux.sh gmail keep        # or name the apps outright
-PREFIX=/some/where ./build-linux.sh
-ARCH=arm64 ./build-linux.sh        # defaults to the host architecture
-./build-linux.sh --uninstall       # remove every app, launcher and icon it installed
-./build-linux.sh --uninstall keep  # remove just that one
-```
-
-`--uninstall` deliberately leaves your signed-in sessions
-(`~/.config/<App Name>/`) alone, so a rebuild doesn't cost you every login. With no names
-it removes everything — it does **not** prompt, because that is what someone typing
-`--uninstall` is asking for.
 
 ---
 
@@ -272,6 +331,7 @@ built with [`@electron/packager`](https://github.com/electron/packager).
 | `build-linux.sh` | Linux: packages each service, installs under `$PREFIX`, writes `.desktop` files and the icon ladder, registers with the desktop. Also `--uninstall`. |
 | `icons/` | 1024px `.icns` app icons (macOS). |
 | `icons/png/` | PNGs extracted from those `.icns` files, used by the Linux build. Regenerated automatically if missing. |
+| `docs/` | Images used by this README (the icon strip and the per-app icons), generated from `icons/png/`. |
 
 ### Getting past Google's login block
 Spoofing the User-Agent alone (what plain Nativefier does) is **not** enough — Google also
@@ -406,7 +466,7 @@ the icon name and the window's `WM_CLASS` — so they all line up by constructio
 - **`WM_CLASS`** comes from `package.json`'s `productName`, which the build bakes in per
   service. It is *not* taken from the executable name, `app.setName()`, or Chromium's
   `--class` switch — all of which are applied too late to affect it. Without this every
-  app would share one `WM_CLASS` and the four apps would collapse into a single taskbar
+  app would share one `WM_CLASS` and every app would collapse into a single taskbar
   icon that no `.desktop` file could match.
 - **Notification identity** comes from the `desktop-entry` hint Electron derives from the
   same name, which is why the `.desktop` filename has to match the slug too. Rename one
@@ -484,7 +544,7 @@ are correctly treated as external.
 | Notification plays a sound but no banner | **macOS:** expected if the app is frontmost (macOS suppresses it) — switch apps. Otherwise set the app's macOS notification style to **Alerts**. |
 | App won't open ("unidentified developer") | Apps are ad-hoc signed and built locally (not quarantined); if macOS still blocks, right-click → **Open** once. |
 | **Linux:** app doesn't appear in the app menu | The build refreshes the desktop caches, but some sessions only re-scan on login. Log out and back in, or run `update-desktop-database ~/.local/share/applications`. |
-| **Linux:** all four apps share one taskbar icon | You're running a build from before the per-service `WM_CLASS` fix — rebuild with `./build-linux.sh`. |
+| **Linux:** all the apps share one taskbar icon | You're running a build from before the per-service `WM_CLASS` fix — rebuild with `./build-linux.sh`. |
 | **Linux:** notifications show a generic icon / wrong app name | The `.desktop` filename must match the app's slug (see **Desktop integration on Linux**). Rebuild rather than renaming files by hand. |
 | **Linux:** Calendar reminder never appeared | Calendar only fires reminders with a Calendar view open. If it was open, see [Notification paths on Linux](#notification-paths-on-linux) for the one path that can't be delivered. |
 | **Linux:** links open in the wrong browser | The app prefers Chrome/Chromium on `PATH`, else your `xdg-open` default. Set `GOOGLE_APP_BROWSER=/path/to/browser` to pin it. |
@@ -512,8 +572,8 @@ are correctly treated as external.
 
 ## Google Messages
 
-Messages is one of the built apps — it is in `services.conf` and `build-linux.sh` installs
-it alongside the other four.
+Messages is one of the built apps — it is in `services.conf` and the installers treat it
+exactly like the rest.
 
 This used to be documented as impossible: Messages was said to render only with
 `contextIsolation:true`, which the sign-in stealth (which needs `contextIsolation:false`)
