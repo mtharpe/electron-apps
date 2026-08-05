@@ -53,7 +53,9 @@ rm -rf build && mkdir -p build
 for entry in "${SELECTED[@]}"; do
   IFS='|' read -r name icon url bid categories <<< "$entry"
   echo "==> Building $name"
-  /usr/bin/python3 -c "import json,sys; json.dump({'name':sys.argv[1],'url':sys.argv[2]}, open('app-config.json','w'))" "$name" "$url"
+  # slug travels into the app so main.js can find styles/<slug>.css without re-deriving it.
+  slug="$(slugify "$name")"
+  /usr/bin/python3 -c "import json,sys; json.dump({'name':sys.argv[1],'url':sys.argv[2],'slug':sys.argv[3]}, open('app-config.json','w'))" "$name" "$url" "$slug"
   npx electron-packager . "$name" --platform=darwin --arch="$ARCH" \
     --icon="$DIR/icons/$icon.icns" --app-bundle-id="$bid" --app-version=1.0.0 \
     --ignore="/build" --ignore="/icons" --ignore="\.sh$" --ignore="\.md$" \
