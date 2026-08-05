@@ -1,8 +1,8 @@
 # Google Standalone Apps for macOS & Linux
 
-Turn **Gmail, Google Calendar, Google Tasks, and Google Keep** into real, standalone desktop
-apps — each with its own icon, its own Dock/taskbar identity, and **native desktop
-notifications** — fully independent of Chrome.
+Turn **Gmail, Google Calendar, Google Tasks, Google Keep, and Google Messages** into real,
+standalone desktop apps — each with its own icon, its own Dock/taskbar identity, and
+**native desktop notifications** — fully independent of Chrome.
 
 Unlike Chrome PWAs, these are genuine separate applications. Unlike plain
 [Nativefier](https://github.com/nativefier/nativefier), they actually get **past Google's
@@ -24,7 +24,7 @@ notification banners** (not just a sound).
 
 - **Standalone apps** — own icon, own Dock tile / taskbar entry, own app-switcher entry;
   not "Google Chrome". On Linux each service gets its own launcher, its own icon and its
-  own `WM_CLASS`, so the four apps never collapse into one taskbar group.
+  own `WM_CLASS`, so the apps never collapse into one taskbar group.
 - **Google sign-in works** — a stealth layer makes the embedded Chromium look like stock
   desktop Chrome, defeating the embedded-browser login block.
 - **Multiple accounts, isolated** — every window uses its own persistent session
@@ -61,7 +61,7 @@ notification banners** (not just a sound).
 - **Maximized on launch** — every account window opens maximized.
 - **One instance per app** — launching a second copy focuses the running one instead of
   starting a rival process fighting over the same session data.
-- **One-command build** — one script packages and installs all four.
+- **One-command build** — one script packages and installs every app in `services.conf`.
 
 ---
 
@@ -113,10 +113,10 @@ right-click → **Options → Keep in Dock**.
 | `~/.local/share/icons/hicolor/*/apps/<slug>.png` | icons, 16px→512px |
 
 Launch from your desktop's app menu, or run `gmail` / `google-calendar` /
-`google-tasks` / `google-keep` from a shell.
+`google-tasks` / `google-keep` / `google-messages` from a shell.
 
 ```bash
-./build-linux.sh                 # build + install all four
+./build-linux.sh                 # build + install every app in services.conf
 PREFIX=/some/where ./build-linux.sh
 ARCH=arm64 ./build-linux.sh      # defaults to the host architecture
 ./build-linux.sh --uninstall     # remove apps, launchers and icons
@@ -181,7 +181,7 @@ built with [`@electron/packager`](https://github.com/electron/packager).
 | `accounts.html` | The **Configure Accounts…** window: a name field and a Chrome profile dropdown per account slot. |
 | `accounts-preload.js` | Context-isolated bridge for that window — exposes load / save / close and nothing else. |
 | `services.conf` | The service list (`name \| icon \| url \| bundle-id \| categories`), shared by both build scripts so they can't drift. |
-| `build.sh` | macOS: builds/installs/signs all four. Builds for the host arch (or `ARCH=universal`). On Linux it hands off to `build-linux.sh`. |
+| `build.sh` | macOS: builds/installs/signs every app in `services.conf`. Builds for the host arch (or `ARCH=universal`). On Linux it hands off to `build-linux.sh`. |
 | `build-linux.sh` | Linux: packages each service, installs under `$PREFIX`, writes `.desktop` files and the icon ladder, registers with the desktop. Also `--uninstall`. |
 | `icons/` | 1024px `.icns` app icons (macOS). |
 | `icons/png/` | PNGs extracted from those `.icns` files, used by the Linux build. Regenerated automatically if missing. |
@@ -296,7 +296,7 @@ outranks the page-derived title below. Leave it blank and a mapped slot takes it
 profile's own name, which is the point of the mapping — the two stay consistent without
 typing anything.
 
-Names and mappings are **shared by all four apps** (`~/.config/google-standalone-apps/accounts.json`,
+Names and mappings are **shared by all the apps** (`~/.config/google-standalone-apps/accounts.json`,
 or `~/Library/Application Support/google-standalone-apps/` on macOS) — "Account 2 is Work" is
 a fact about your Google accounts, not about Gmail-the-app, so you name them once. Only the
 labels and the routing are shared; the sessions stay isolated per app exactly as before. Each
@@ -331,8 +331,8 @@ A name set in **Configure Accounts…** (or inherited from the mapped Chrome pro
 With neither, a global `web-contents-created` hook titles each window with the account/org name and
 re-applies it on every load (suppressing Google's own long page title). Gmail & Calendar
 expose the org name in their page title (*Spectro Cloud*, *Google Calendar*, …); **Keep**
-has no org name in its title so it falls back to the signed-in **email**; **Tasks** stays
-*Tasks* (a single embedded view with no per-account context).
+and **Tasks** have no org name in their titles, so they fall back to the signed-in **email**
+read off the account avatar; **Messages** exposes neither, so it keeps its page title.
 
 ### Consistent Gmail view
 For the Gmail app only, `main.js` injects a stylesheet that hides Workspace Gmail's left
@@ -425,36 +425,25 @@ are correctly treated as external.
 
 ## Google Messages
 
-Messages **can't** be one of these Electron apps: it now requires Google sign-in (QR
-pairing was removed), but its renderer only works with `contextIsolation:true`, which is
-incompatible with the sign-in stealth — every way to add the stealth blanks the page, and
-without it Google blocks sign-in. There's no Electron config where it both renders **and**
-signs in.
+Messages is one of the built apps — it is in `services.conf` and `build-linux.sh` installs
+it alongside the other four.
 
-Set it up as a **browser web app** instead (a real browser → sign-in works, standalone
-icon, notifications):
+This used to be documented as impossible: Messages was said to render only with
+`contextIsolation:true`, which the sign-in stealth (which needs `contextIsolation:false`)
+rules out, leaving no config that both rendered and signed in. That is no longer true.
+Measured against `https://messages.google.com/web/` under the standard `STEALTH_WEBPREFS`,
+the page renders fully — 17 stylesheets, correct dark theme, the whole welcome screen — and
+Messages once again offers **both** "Sign In" and "Pair with QR code", so the QR path that
+was reported removed is back.
 
-**macOS** — Safari web app:
-1. Open `https://messages.google.com/web/` in **Safari**, sign in.
-2. **File → Add to Dock** → name it *Google Messages* → Add.
-3. Give it the matching icon from this repo:
-   ```bash
-   ./set-messages-icon.sh            # applies icons/messages.icns to ~/Applications/Messages.app
-   ```
-   (A PWA in a non-Chrome Chromium browser like Brave/Edge works too.)
-
-**Linux** — install it as a PWA from any Chromium-based browser:
-1. Open `https://messages.google.com/web/`, sign in.
-2. Menu → **Cast, save and share → Install page as app** (wording varies by browser).
-
-The browser writes its own `.desktop` entry and icon, so `set-messages-icon.sh` (which is
-macOS-only — it uses `NSWorkspace`) isn't needed.
+`set-messages-icon.sh` is left in the repo but is no longer part of setting Messages up. It
+applied `icons/messages.icns` to a Safari "Add to Dock" web app on macOS, which is the
+workaround this app replaces.
 
 ## Limitations
 
 - Builds for the **host architecture** automatically (`uname -m`). On macOS export
   `ARCH=universal` for a fat binary; on Linux set `ARCH=arm64`/`x64` to cross-target.
-- Google Tasks has no standalone page; it uses the embedded Tasks view.
 - Web Calendar has no native snooze in notifications (a Google limitation, not this app).
 - On Linux, notifications posted from inside a service worker can't be displayed — see
   [Notification paths on Linux](#notification-paths-on-linux). Calendar reminders are not
