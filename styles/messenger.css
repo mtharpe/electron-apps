@@ -3,21 +3,20 @@
  * Meta folded Messenger into Facebook, so the app loads facebook.com/messages/t/. This trims
  * Facebook's site chrome so what's left reads as Messenger rather than the whole of Facebook.
  *
- * IMPORTANT, whoever maintains this: it is anchored on ARIA roles, not Facebook's obfuscated,
- * churning class names, because those change constantly (this is the maintenance treadmill
- * Caprine lives on). Roles are far more stable, but Facebook can still move things — if a
- * chunk of chrome reappears, inspect it and add a role-anchored rule here rather than a class
- * selector, which will rot within weeks. This shipped WITHOUT being verified behind a
- * Facebook login, so it is a conservative starting point, not a finished skin.
+ * VERIFIED behind a real Facebook login (unlike the first pass, which was written blind).
+ * On the logged-in messages page the only Facebook chrome present is the global top bar —
+ * the [role="banner"] landmark holding "Search Facebook", the Facebook logo and the account
+ * controls. Hiding it leaves a clean three-pane Messenger: the Thread list
+ * ([role="navigation"] "Thread list"), the conversation ([role="main"]), and Messenger's own
+ * details panel. There is no feed, Marketplace, Watch, Reels or composer to hide — confirmed
+ * absent from the logged-in DOM, not assumed.
+ *
+ * Anchored on the ARIA role, not Facebook's obfuscated, churning class names — the one stable
+ * handle. If Facebook restructures and a chunk of chrome returns, inspect it and add a
+ * role- or aria-label-anchored rule here; never a class selector, which rots within weeks.
+ * The earlier speculative [role="complementary"] cookie/notification rules were removed: they
+ * matched nothing on the real page, and an aria-label*="notification" hide risks catching
+ * Messenger's own notification surface. Add a rule back only against something actually seen.
  */
 
-/* The blue global top bar (search, Home, notifications, profile, Marketplace, …). This is
- * Facebook's site header, distinct from Messenger's own conversation header, so hiding it
- * removes the "I'm in Facebook" chrome while leaving the chat UI intact. */
 [role="banner"] { display: none !important; }
-
-/* Facebook's cookie / consent / "install the app" style bottom banners, which sit in a
- * complementary landmark rather than the main content. Kept narrow so it can't swallow the
- * conversation list. */
-[role="complementary"][aria-label*="cookie" i],
-[role="complementary"][aria-label*="notification" i] { display: none !important; }
