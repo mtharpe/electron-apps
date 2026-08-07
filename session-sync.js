@@ -285,28 +285,62 @@ async function injectInto(ses, cookies) {
   return ok;
 }
 
-// Before a slot's window loads: if it is signed out and a session exists for the email that
-// slot is meant to be, adopt it so the first paint is already authenticated. Returns true if
-// it injected anything. Never disturbs a slot that is already signed in.
-async function adoptBeforeLoad(slot) {
-  if (!enabled) return false;
-  const email = ctx.emailForSlot(slot);
-  if (!email) return false;
-  const ses = session.fromPartition('persist:account-' + slot);
-  if (await hasSession(ses)) return false; // already signed in; leave it
-
-  const data = await readStored(email);
-  if (!data) return false;
-  const hash = sessionHash(data.cookies);
-  const ok = await injectInto(ses, data.cookies);
-  if (ok) { syncedHash.set(email, hash); log('adopted session for ' + email + ' into slot ' + slot + ' (' + ok + ' cookies)'); }
-  return ok > 0;
+// The Google sign-in host. An app only ever adopts a shared Google session when it actually
+// navigates here — which scopes the whole thing to apps that use Google to log in, and
+// nothing else. The Google apps land here when signed out; Tidal lands here during its
+// "continue with Google" OAuth; Messenger (Meta auth) and any future non-Google app never
+// do, so a copy of the Google session is never injected into a jar that can't use it.
+const AUTH_LOGIN_HOST = 'accounts.google.com';
+function isGoogleAuthUrl(url) {
+  try {
+    const h = new URL(url).hostname.toLowerCase();
+    return h === AUTH_LOGIN_HOST || h.endsWith('.' + AUTH_LOGIN_HOST);
+  } catch (e) { return false; }
 }
 
-// A sibling app just published (the store changed). For each running window whose slot is
-// signed out and sitting on a Google login screen, adopt and reload — so a login in one app
-// lights up the others that are open. A window already showing app content is left alone; we
-// do not yank a session change under someone mid-task.
+// slot -> hash of the session we last injected for it, so a stale/expired session that keeps
+// bouncing back to the login page is tried once, not in a reload loop.
+const attemptedHash = new Map();
+
+// The window for `slot` has navigated to the Google sign-in page. If the slot is signed out
+// and a session exists for the email it is meant to be, inject it and reload the CURRENT
+// page. Reloading accounts.google.com itself (not the app URL) is deliberate and works for
+// both shapes: a plain login redirects onward to its `continue=` target, and an OAuth
+// authorize request auto-approves and redirects to its `redirect_uri` — so Gmail lands in the
+// inbox and Tidal's Google OAuth completes, with the same code and no app-specific handling.
+async function adoptForAuth(slot, wc) {
+  if (!enabled || wc.isDestroyed()) return;
+  const email = ctx.emailForSlot(slot);
+  if (!email) return;
+  const ses = session.fromPartition('persist:account-' + slot);
+  if (await hasSession(ses)) return; // already have a Google session; nothing to do
+
+  const data = await readStored(email);
+  if (!data) return;
+  const hash = sessionHash(data.cookies);
+  if (attemptedHash.get(slot) === hash) return; // already tried this exact session — no loop
+  attemptedHash.set(slot, hash);
+
+  const ok = await injectInto(ses, data.cookies);
+  if (ok && !wc.isDestroyed()) {
+    syncedHash.set(email, hash);
+    log('adopted session for ' + email + ' into slot ' + slot + ' (' + ok + ' cookies) at Google sign-in');
+    wc.reload();
+  }
+}
+
+// Watch a slot's window: adopt when, and only when, its main frame reaches Google sign-in.
+function watchAuthNavigation(slot, wc) {
+  wc.on('did-start-navigation', (e, url, isInPlace, isMainFrame) => {
+    if (isMainFrame && !isInPlace && isGoogleAuthUrl(url)) adoptForAuth(slot, wc);
+  });
+}
+
+// A sibling app just published (the store changed). Only windows that are themselves sitting
+// at Google sign-in are touched — same scoping as adoptForAuth: the injection happens for a
+// window that is actively trying to Google-authenticate, never pre-emptively into a jar that
+// is on its own app or on a non-Google login. A window already showing app content is left
+// alone; we do not yank a session change out from under someone mid-task.
 let watchTimer = null;
 function onStoreChanged() {
   if (watchTimer) return;                  // coalesce the burst of events a write produces
@@ -316,23 +350,20 @@ function onStoreChanged() {
     for (const slot of activeSlots()) {
       const email = ctx.emailForSlot(slot);
       if (!email) continue;
+      const wins = ctx.windowsForSlot(slot)
+        .filter((w) => w && !w.isDestroyed() && isGoogleAuthUrl(w.webContents.getURL()));
+      if (!wins.length) continue;                      // no window here is at Google sign-in
       const ses = session.fromPartition('persist:account-' + slot);
       if (await hasSession(ses)) continue;             // already signed in
       const data = await readStored(email);
       if (!data) continue;
       const hash = sessionHash(data.cookies);
       if (syncedHash.get(email) === hash) continue;    // already have this one
-      const wins = ctx.windowsForSlot(slot).filter((w) => w && !w.isDestroyed());
-      if (!wins.length) continue;
       const injected = await injectInto(ses, data.cookies);
       if (!injected) continue;
       syncedHash.set(email, hash);
-      for (const w of wins) {
-        const url = w.webContents.getURL();
-        // Only reload a window that is actually sitting at a Google sign-in screen; do not
-        // reload one already showing the app.
-        if (/accounts\.google\.com|ServiceLogin|\/signin/i.test(url)) w.webContents.reload();
-      }
+      attemptedHash.set(slot, hash);
+      for (const w of wins) w.webContents.reload();
       log('propagated session for ' + email + ' to slot ' + slot);
     }
   }, 800);
@@ -389,4 +420,4 @@ async function init(context) {
   log('ready (keyring: ' + keyBackendName + ')');
 }
 
-module.exports = { init, attachSlot, adoptBeforeLoad, publish };
+module.exports = { init, attachSlot, watchAuthNavigation, publish };
