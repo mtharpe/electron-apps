@@ -976,12 +976,25 @@ const APP_DOMAIN = (() => {
   return parts.length >= 2 ? parts.slice(-2).join('.') : APP_HOST;
 })();
 
+// Extra first-party domains a service declares because its product spans more than one
+// registrable domain. Messenger is the case that forced this: the app points at
+// facebook.com, but Meta serves voice/video CALLS from messenger.com, so a call window opens
+// on a domain that is not the app's own — and without this it would be treated as external
+// and shoved to the browser, breaking the call entirely. Declared per service in
+// services.conf (see the `related` field), carried in app-config.json, so generic code never
+// hardcodes any vendor's second domain.
+const APP_RELATED_HOSTS = String(cfg.related || '')
+  .split(/[,\s]+/).map((s) => s.trim().toLowerCase().replace(/^\.+/, '')).filter(Boolean);
+
 // Kept in-app rather than pushed out to the browser. Google's hosts are here because four
 // of the bundled apps are Google's and their UI spans several of them; the app's own domain
 // is here because every app needs its own pages, and a Tidal wrapper that opened
-// tidal.com links in Firefox would be useless -- sign-in alone would never complete.
+// tidal.com links in Firefox would be useless -- sign-in alone would never complete; the
+// declared related hosts cover a product split across two domains (Messenger's calls).
 function isFirstPartyHost(host) {
-  return hasSuffix(host, GOOGLE_HOST_SUFFIXES) || (!!APP_DOMAIN && hasSuffix(host, [APP_DOMAIN]));
+  return hasSuffix(host, GOOGLE_HOST_SUFFIXES)
+    || (!!APP_DOMAIN && hasSuffix(host, [APP_DOMAIN]))
+    || (APP_RELATED_HOSTS.length > 0 && hasSuffix(host, APP_RELATED_HOSTS));
 }
 
 // Enterprise SSO / identity-provider domains. Corporate Google Workspace sign-in commonly
@@ -1149,6 +1162,7 @@ function attachExternalLinkRouting(wc) {
         return { action: 'allow', overrideBrowserWindowOptions: { webPreferences } };
       }
     } catch (e) { /* fall through to Chrome */ }
+    logExternalRoute('popup', url);
     openInChrome(url, slot);
     return { action: 'deny' };
   });
@@ -1167,8 +1181,20 @@ function attachExternalLinkRouting(wc) {
     if (u.protocol !== 'http:' && u.protocol !== 'https:') return;
     if (mayLoadInApp(u)) return; // first-party / SSO → allow the in-frame navigation
     event.preventDefault();
+    logExternalRoute('navigate', url);
     openInChrome(url, slotOf(wc));
   });
+}
+
+// One line whenever a URL is sent OUT to the real browser. This is the routing decision that
+// broke Messenger calls (a messenger.com popup treated as external), so seeing the exact host
+// it rejected is how any future "X opened in my browser instead of the app" is diagnosed in
+// one step rather than guessed at. Host only in the log — never the full URL, which can carry
+// tokens.
+function logExternalRoute(kind, url) {
+  let host = '?';
+  try { host = new URL(url).host; } catch (e) {}
+  logRecovery('routed ' + kind + ' to browser: ' + host);
 }
 
 function openAccountWindow(n) {
