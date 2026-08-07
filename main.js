@@ -173,6 +173,9 @@ function scheduleReload(wc, url) {
 // reloaded until something does.
 const REACHABILITY_TIMEOUT_MS = 5000;
 const REACHABILITY_BACKOFF_MS = [1000, 2000, 5000, 10000, 15000, 30000];
+// Cap the post-wake wait: ~40 tries settle at 30s each ≈ 20 min of trying, after which a
+// still-offline machine is left alone until the next resume/unlock re-arms recovery.
+const RESUME_MAX_ATTEMPTS = 40;
 
 function probeOrigin() {
   return new Promise((resolve) => {
@@ -216,10 +219,16 @@ function recoverAfterResume(trigger) {
   const started = Date.now();
   logRecovery(trigger + ': waiting for ' + APP_URL + ' to answer');
   resumeRecovery = (async () => {
-    for (let attempt = 0; ; attempt++) {
-      if (await probeOrigin()) break;
+    // Wait for the origin to answer, but not forever: if the machine simply stays offline
+    // there is nothing to recover, and the NEXT resume/unlock re-arms this anyway. Bounded so
+    // a permanently-offline session doesn't leave a timer looping for the life of the process.
+    let reachable = false;
+    for (let attempt = 0; attempt < RESUME_MAX_ATTEMPTS; attempt++) {
+      if (BrowserWindow.getAllWindows().every((w) => w.isDestroyed())) return; // nothing to reload
+      if (await probeOrigin()) { reachable = true; break; }
       await wait(REACHABILITY_BACKOFF_MS[Math.min(attempt, REACHABILITY_BACKOFF_MS.length - 1)]);
     }
+    if (!reachable) { logRecovery(trigger + ': origin still unreachable, giving up until next wake'); return; }
     let reloaded = 0;
     for (const win of BrowserWindow.getAllWindows()) {
       if (win.isDestroyed()) continue;
@@ -1114,6 +1123,12 @@ function openInChrome(url, slot) {
 // through to Electron's default (a dead in-app window) instead of opening the real browser.
 // The new window inherits its opener's persist:account-N session; we tag that session with
 // __partition (see openAccountWindow) so the allowed child stays in the same cookie jar.
+// True if a URL may load IN-APP: the app's own first-party hosts, and recognized SSO
+// providers during sign-in. Everything else belongs in the user's real browser.
+function mayLoadInApp(u) {
+  return isFirstPartyHost(u.hostname) || isAuthHost(u.hostname);
+}
+
 function attachExternalLinkRouting(wc) {
   wc.setWindowOpenHandler(({ url }) => {
     // Resolved per click, not captured once: the slot's Chrome profile can change from the
@@ -1126,7 +1141,7 @@ function attachExternalLinkRouting(wc) {
         openInChrome(u.searchParams.get('q') || u.searchParams.get('url') || url, slot);
         return { action: 'deny' };
       }
-      if (isFirstPartyHost(u.hostname) || isAuthHost(u.hostname)) {
+      if (mayLoadInApp(u)) {
         const part = wc.session && wc.session.__partition;
         const webPreferences = part
           ? Object.assign({ partition: part }, STEALTH_WEBPREFS)
@@ -1136,6 +1151,23 @@ function attachExternalLinkRouting(wc) {
     } catch (e) { /* fall through to Chrome */ }
     openInChrome(url, slot);
     return { action: 'deny' };
+  });
+
+  // setWindowOpenHandler only covers window.open / target=_blank. A TOP-FRAME navigation to
+  // an outside site — a plain <a> with no target, a JS location= , a form post — would
+  // otherwise replace the app with that site IN the stealth renderer, which still carries the
+  // spoofed Chrome fingerprint and the granted permissions (clipboard-read, notifications).
+  // So gate main-frame navigation the same way: first-party and SSO hosts load in-app,
+  // anything else is denied here and handed to the real browser instead.
+  wc.on('will-navigate', (event, url) => {
+    let u;
+    try { u = new URL(url); } catch (e) { return; } // unparseable — leave it to Electron
+    // Only http(s) is ours to route. about:/blob:/data:/chrome-extension: and the like are
+    // in-app machinery (the initial blank document, blob downloads) — never send them out.
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return;
+    if (mayLoadInApp(u)) return; // first-party / SSO → allow the in-frame navigation
+    event.preventDefault();
+    openInChrome(url, slotOf(wc));
   });
 }
 
