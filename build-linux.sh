@@ -33,12 +33,31 @@ case "${ARCH:-$(uname -m)}" in
   *)                ARCH="${ARCH:-$(uname -m)}" ;;
 esac
 
-# @electron/packager downloads the Electron dist itself, and defaults to the official
-# electron/electron releases — where this project's Electron does not exist. package.json
-# pins castlabs' Widevine-enabled fork, whose version carries a +wvcus suffix, so the
-# default lookup 404s. Point the downloader at the fork; the asset names are otherwise
-# identical. Overridable, for anyone who mirrors these internally.
-export ELECTRON_MIRROR="${ELECTRON_MIRROR:-https://github.com/castlabs/electron-releases/releases/download/}"
+# @electron/packager fetches Electron through @electron/get, and neither the default
+# URL builder nor its env-var overrides match what castlabs actually publishes: the
+# release tag carries a +wvcus suffix (v42.8.0+wvcus) and so does the main asset
+# (electron-v42.8.0+wvcus-linux-x64.zip), while the checksum file stays at the
+# ordinary SHASUMS256.txt path. ELECTRON_CUSTOM_FILENAME applies to EVERY download
+# @electron/get makes — pointing it at the +wvcus zip makes @electron/get fetch the
+# zip when it wanted SHASUMS256 and choke on the binary — so there is no combination
+# of ELECTRON_CUSTOM_* vars that gets both requests right. Bypass the whole path:
+# fetch the castlabs zip once ourselves, stage it under the plain-version name that
+# packager expects, and pass --electron-zip-dir. That skips @electron/get's download
+# and checksum steps entirely; the resolved tag is the integrity check.
+ELECTRON_VER=$(node -p "require('./package.json').devDependencies.electron.split('#v')[1].split('+')[0]")
+ELECTRON_ZIP_DIR="${ELECTRON_ZIP_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/linux-google-apps}"
+mkdir -p "$ELECTRON_ZIP_DIR"
+# --electron-zip-dir demands exactly this filename — the +wvcus suffix belongs in
+# the URL, not on disk. Kept together with the download so the two never drift.
+STAGED_ZIP="$ELECTRON_ZIP_DIR/electron-v${ELECTRON_VER}-linux-${ARCH}.zip"
+if [ ! -s "$STAGED_ZIP" ]; then
+  # ELECTRON_ZIP_URL fully overrides for an internal mirror; ELECTRON_MIRROR still
+  # works as the base if someone had already set it. Neither is required.
+  URL="${ELECTRON_ZIP_URL:-${ELECTRON_MIRROR:-https://github.com/castlabs/electron-releases/releases/download/}v${ELECTRON_VER}+wvcus/electron-v${ELECTRON_VER}+wvcus-linux-${ARCH}.zip}"
+  echo "==> Downloading Electron $ELECTRON_VER+wvcus (linux-$ARCH)"
+  curl -fSL --retry 3 -o "$STAGED_ZIP.part" "$URL"
+  mv "$STAGED_ZIP.part" "$STAGED_ZIP"
+fi
 
 . "$DIR/services.conf"
 # Provides slugify(), list_services() and resolve_services() — shared with build.sh so the
@@ -396,6 +415,7 @@ for entry in "${SELECTED[@]}"; do
   # below matches on); without it the binary would be "Google Calendar", spaces and all.
   npx electron-packager . "$name" --platform=linux --arch="$ARCH" \
     --executable-name="$slug" --app-version=1.0.0 \
+    --electron-zip-dir="$ELECTRON_ZIP_DIR" \
     --ignore="/build" --ignore="/icons" --ignore="\.sh$" --ignore="\.md$" \
     --ignore="/services\.conf$" \
     --out="$DIR/build" --overwrite >/dev/null
