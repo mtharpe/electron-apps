@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/apps.png" alt="Gmail, Google Calendar, Google Tasks, Google Keep, Google Messages, Tidal" width="700">
+<img src="docs/apps.png" alt="Gmail, Google Calendar, Google Tasks, Google Keep, Google Messages, Tidal, Messenger" width="760">
 
 # Electron Apps
 
@@ -42,6 +42,7 @@ audio is **Widevine-protected**, which stock Electron cannot play at all. See
 | <img src="docs/icons/google-keep.png" width="40"> | **Google Keep** | `keep.google.com` | `google-keep` |
 | <img src="docs/icons/google-messages.png" width="40"> | **Google Messages** | `messages.google.com` | `google-messages` |
 | <img src="docs/icons/tidal.png" width="40"> | **Tidal** | `listen.tidal.com` | `tidal` |
+| <img src="docs/icons/messenger.png" width="40"> | **Messenger** | `messenger.com` | `messenger` |
 
 Install all of them, **[just the ones you want](#choosing-which-apps-to-install)**, or none
 of them — **[add your own](#add--change-a-service)** and build only that.
