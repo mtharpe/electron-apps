@@ -47,9 +47,13 @@ esac
 ELECTRON_VER=$(node -p "require('./package.json').devDependencies.electron.split('#v')[1].split('+')[0]")
 ELECTRON_ZIP_DIR="${ELECTRON_ZIP_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/linux-google-apps}"
 mkdir -p "$ELECTRON_ZIP_DIR"
-# --electron-zip-dir demands exactly this filename — the +wvcus suffix belongs in
-# the URL, not on disk. Kept together with the download so the two never drift.
-STAGED_ZIP="$ELECTRON_ZIP_DIR/electron-v${ELECTRON_VER}-linux-${ARCH}.zip"
+# --electron-zip-dir looks up the file under the electron version @electron/packager
+# reads from node_modules/electron/package.json, and castlabs publishes that as
+# "42.8.0+wvcus" — so the on-disk name MUST carry the +wvcus suffix; without it
+# packager reports "The specified Electron ZIP file does not exist" and the build
+# stops. The zip's URL basename already carries the same suffix, so download and
+# lookup names cannot drift.
+STAGED_ZIP="$ELECTRON_ZIP_DIR/electron-v${ELECTRON_VER}+wvcus-linux-${ARCH}.zip"
 if [ ! -s "$STAGED_ZIP" ]; then
   # ELECTRON_ZIP_URL fully overrides for an internal mirror; ELECTRON_MIRROR still
   # works as the base if someone had already set it. Neither is required.
