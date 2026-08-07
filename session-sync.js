@@ -240,7 +240,10 @@ async function publish(slot) {
 
   try {
     fs.mkdirSync(ctx.storeDir, { recursive: true, mode: 0o700 });
-    const tmp = storeFile(email) + '.' + process.pid + '.tmp';
+    // Unique per write (pid + random), so two publishes for the same email — even
+    // concurrently in one process — never share a temp path and clobber each other's bytes
+    // before the atomic rename.
+    const tmp = storeFile(email) + '.' + process.pid + '.' + crypto.randomBytes(4).toString('hex') + '.tmp';
     fs.writeFileSync(tmp, encrypt(key, payload), { mode: 0o600 });
     fs.renameSync(tmp, storeFile(email)); // atomic: a reader never sees a half-written file
     syncedHash.set(email, hash);
