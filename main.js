@@ -1143,24 +1143,35 @@ function mayLoadInApp(u) {
 }
 
 function attachExternalLinkRouting(wc) {
+  // Allow a popup in-app, keeping it in the opener's account session/cookie jar.
+  const allowInApp = () => {
+    const part = wc.session && wc.session.__partition;
+    const webPreferences = part
+      ? Object.assign({ partition: part }, STEALTH_WEBPREFS)
+      : STEALTH_WEBPREFS;
+    return { action: 'allow', overrideBrowserWindowOptions: { webPreferences } };
+  };
+
   wc.setWindowOpenHandler(({ url }) => {
     // Resolved per click, not captured once: the slot's Chrome profile can change from the
     // Accounts window while these handlers stay attached.
     const slot = slotOf(wc);
     try {
       const u = new URL(url);
+      // A popup with no http(s) scheme — about:blank, blob:, data: — is the app opening a
+      // child window it will DRIVE itself, not a navigation to somewhere. Messenger opens
+      // voice/video CALL windows as about:blank and then navigates them to the real call URL;
+      // shoving that to the browser (what shell.openExternal did with 'about:blank') opens a
+      // dead blank tab and the call never fires. Keep it in-app; the follow-on navigation to
+      // the real URL is gated by will-navigate below (messenger.com is first-party now, so it
+      // stays). will-navigate already lets these schemes pass — this makes window.open agree.
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') return allowInApp();
       // Gmail wraps links inside emails in a google.com/url?q=<target> redirector → Chrome.
       if (/(^|\.)google\.com$/.test(u.hostname) && u.pathname === '/url') {
         openInChrome(u.searchParams.get('q') || u.searchParams.get('url') || url, slot);
         return { action: 'deny' };
       }
-      if (mayLoadInApp(u)) {
-        const part = wc.session && wc.session.__partition;
-        const webPreferences = part
-          ? Object.assign({ partition: part }, STEALTH_WEBPREFS)
-          : STEALTH_WEBPREFS;
-        return { action: 'allow', overrideBrowserWindowOptions: { webPreferences } };
-      }
+      if (mayLoadInApp(u)) return allowInApp();
     } catch (e) { /* fall through to Chrome */ }
     logExternalRoute('popup', url);
     openInChrome(url, slot);
@@ -1186,15 +1197,19 @@ function attachExternalLinkRouting(wc) {
   });
 }
 
-// One line whenever a URL is sent OUT to the real browser. This is the routing decision that
-// broke Messenger calls (a messenger.com popup treated as external), so seeing the exact host
-// it rejected is how any future "X opened in my browser instead of the app" is diagnosed in
-// one step rather than guessed at. Host only in the log — never the full URL, which can carry
-// tokens.
+// One line whenever a URL is sent OUT to the real browser — the routing decision that has
+// twice been the culprit for Messenger calls (first a messenger.com popup, then an
+// about:blank one), so it names exactly what it rejected. For http(s) it logs the SCHEME +
+// HOST only, never the path/query, which can carry tokens. For schemeless/internal URLs
+// (about:, blob:, data:) there is no token to leak, so the whole value is logged — that is
+// precisely the case where the host is empty and only the scheme tells you what happened.
 function logExternalRoute(kind, url) {
-  let host = '?';
-  try { host = new URL(url).host; } catch (e) {}
-  logRecovery('routed ' + kind + ' to browser: ' + host);
+  let detail = '?';
+  try {
+    const u = new URL(url);
+    detail = (u.protocol === 'http:' || u.protocol === 'https:') ? (u.protocol + '//' + u.host) : String(url).slice(0, 80);
+  } catch (e) { detail = String(url).slice(0, 40); }
+  logRecovery('routed ' + kind + ' to browser: ' + detail);
 }
 
 function openAccountWindow(n) {
