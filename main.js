@@ -943,6 +943,17 @@ ipcMain.on('mirror-notification', (event, n) => {
   });
 });
 
+// A page-level notification (one Electron shows itself on Linux, so it is NOT mirrored) was
+// clicked. Electron does not focus the app for those, so the preload forwards the click here
+// and we raise the window it belongs to. This is the click→focus that the mirrored path gets
+// for free but the native path did not — the reason clicking e.g. a Google Messages
+// notification did nothing.
+ipcMain.on('notification-focus', (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  logRecovery('notification click → focus ' + (win ? 'slot ' + (slotOf(event.sender) || '?') : 'no window'));
+  focusWindow(win);
+});
+
 // KNOWN LIMITATION, Linux: a notification posted from INSIDE a service worker's own scope
 // never reaches the desktop. Electron does not display persistent notifications on Linux,
 // showNotification() resolves successfully and nothing appears, and the worker's scope

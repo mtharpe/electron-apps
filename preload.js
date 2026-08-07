@@ -132,15 +132,24 @@
     // 7a) page-level Notification — wrap construction via a Proxy; the returned object is
     //     still a genuine Notification.
     //
-    //     macOS ONLY. Electron delivers plain page-level notifications to the Linux
-    //     desktop by itself, so mirroring them there would post a second, identical
-    //     banner for every single reminder. (Persistent notifications are the opposite
-    //     case — Electron never shows those on Linux — so 7b below stays on everywhere.)
-    if (window.Notification && IS_MAC) {
+    //     macOS: mirror to the native main-process path (its field-tested behaviour), which
+    //       carries its own click→focus.
+    //     Linux: Electron ALREADY shows page-level notifications, so mirroring would post a
+    //       second identical banner — but Electron does NOT focus the app when one is
+    //       clicked, so clicking a page-level notification (e.g. Google Messages) did
+    //       nothing. So on Linux we do not mirror (no double banner); we attach a click
+    //       handler that asks the main process to focus this window. This runs ALONGSIDE the
+    //       page's own onclick (which navigates to the right conversation) — the page's
+    //       window.focus() can't raise the OS window from a renderer, the IPC can.
+    if (window.Notification) {
       window.Notification = new Proxy(window.Notification, {
         construct(target, argList) {
-          try { fire(argList[0], argList[1]); } catch (e) {}
-          return Reflect.construct(target, argList, target);
+          if (IS_MAC) { try { fire(argList[0], argList[1]); } catch (e) {} }
+          const notif = Reflect.construct(target, argList, target);
+          if (!IS_MAC && ipc) {
+            try { notif.addEventListener('click', () => { try { ipc.send('notification-focus'); } catch (e) {} }); } catch (e) {}
+          }
+          return notif;
         },
       });
     }
