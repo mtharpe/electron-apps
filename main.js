@@ -1196,13 +1196,13 @@ function openAccountWindow(n) {
   // would otherwise never share its session. did-finish-load covers that; publish is
   // hash-guarded, so the repeat loads a Google page does are no-ops.
   win.webContents.on('did-finish-load', () => sessionSync.publish(n));
-  // Seed this slot from a session another app already established for the same account, if
-  // there is one, BEFORE the first load — so a signed-in slot paints authenticated instead
-  // of flashing a login screen. adoptBeforeLoad no-ops when the slot is already signed in or
-  // no shared session exists, so the ordinary path just loads immediately.
-  sessionSync.adoptBeforeLoad(n).finally(() => {
-    if (!win.isDestroyed()) win.loadURL(APP_URL, { userAgent: CHROME_UA });
-  });
+  // Adopt a shared session ONLY if this window actually reaches Google sign-in — so the
+  // Google apps (and Tidal's "continue with Google") pick up an existing session, while an
+  // app that never authenticates through Google never has a Google session injected into its
+  // jar. The trade for that scoping: a signed-out Google app flashes its login redirect once
+  // before the session is adopted and it reloads, rather than painting pre-authenticated.
+  sessionSync.watchAuthNavigation(n, win.webContents);
+  win.loadURL(APP_URL, { userAgent: CHROME_UA });
   win.on('closed', () => {
     if (revealTimer) { clearTimeout(revealTimer); revealTimer = null; }
     windows.delete(n);
