@@ -119,14 +119,22 @@
     let seq = 0;
     const fire = (title, options) => {
       options = options || {};
-      if (ipc) {
-        ipc.send('mirror-notification', {
-          id: 'n' + (++seq),
-          title: String(title == null ? '' : title),
-          body: String(options.body || ''),
-          tag: String(options.tag || ''),
-        });
-      }
+      if (!ipc) return;
+      // Forward the Notification `data` field alongside title/body. Web Notifications spec
+      // requires data to be structured-cloneable, and Electron's IPC uses structured clone —
+      // so a well-behaved page's data reaches the main process untouched. Probe with
+      // structuredClone first anyway: a page that stuffs something non-cloneable in there
+      // would otherwise make ipc.send throw and lose the whole notification. Falling back to
+      // undefined keeps the title/body path working even when data can't come along.
+      let data;
+      try { structuredClone(options.data); data = options.data; } catch (e) { data = undefined; }
+      ipc.send('mirror-notification', {
+        id: 'n' + (++seq),
+        title: String(title == null ? '' : title),
+        body: String(options.body || ''),
+        tag: String(options.tag || ''),
+        data,
+      });
     };
 
     // 7a) page-level Notification — wrap construction via a Proxy; the returned object is
