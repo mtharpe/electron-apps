@@ -274,9 +274,12 @@ Three ways this bites if you are not expecting it:
 - **`ELECTRON_MIRROR` must point at the fork.** `@electron/packager` downloads the Electron
   dist itself and defaults to `electron/electron`, where the `+wvcus` tag does not exist —
   the build 404s. Both build scripts export it.
-- **Windows must wait for `components.whenReady()`.** A renderer created before the CDM is
-  installed never gets one and fails to play for its whole life. `whenWidevineReady()` does
-  this, bounded at 15s so a machine with no network still opens its windows.
+- **Windows in a DRM app must wait for `components.whenReady()`.** A renderer created before
+  the CDM is installed never gets one and fails to play for its whole life.
+  `whenWidevineReady()` does this, bounded at 15s so a machine with no network still opens
+  its windows. **Non-DRM apps skip the wait**: it is gated on `cfg.drm`, which is set from
+  the `drm` column in `services.conf`. Without the flag the wait is 0 ms AND the ~21 MB
+  Widevine CDM is never downloaded per app — pure loss for apps that never touch DRM.
 
 Verify with `createMediaKeys()`, not just `requestMediaKeySystemAccess` — the former proves a
 usable CDM rather than a feature-detect:

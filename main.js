@@ -873,9 +873,16 @@ function spoofSession(sess) {
 // up with an app that shows nothing at all on a machine that woke up without Wi-Fi. So it
 // is bounded: wait, and if it has not finished in time, open the windows anyway. A DRM app
 // then fails to play until the next launch, which is a far better outcome than no window.
+//
+// Only DRM apps pay this cost. components.whenReady() triggers a ~21 MB CDM download and
+// costs up to WIDEVINE_READY_TIMEOUT_MS of first-paint delay — pure waste for any app that
+// never touches Widevine (Gmail, Calendar, Keep, Tasks, Messages, Messenger). Gated on
+// `drm` in services.conf, plumbed through app-config.json.
 const WIDEVINE_READY_TIMEOUT_MS = 15000;
 
 async function whenWidevineReady() {
+  // Non-DRM apps neither wait for nor cache the CDM — see the note above.
+  if (!cfg.drm) return;
   let components;
   try { components = require('electron').components; } catch (e) { return; }
   // Stock Electron has no `components` at all; nothing to wait for.
