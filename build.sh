@@ -23,37 +23,6 @@ fi
 # or Intel (x86_64 -> x64). Override by exporting ARCH=universal for a fat binary.
 ARCH="${ARCH:-$([ "$(uname -m)" = "x86_64" ] && echo x64 || echo arm64)}"
 
-# service | icon-name | url | bundle-id | categories (categories are Linux-only, unused here)
-# @electron/packager fetches Electron through @electron/get, and neither the default
-# URL builder nor its env-var overrides match what castlabs actually publishes: the
-# release tag carries a +wvcus suffix (v42.8.0+wvcus) and so does the main asset
-# (electron-v42.8.0+wvcus-darwin-arm64.zip), while the checksum file stays at the
-# ordinary SHASUMS256.txt path. ELECTRON_CUSTOM_FILENAME applies to EVERY download
-# @electron/get makes — pointing it at the +wvcus zip makes @electron/get fetch the
-# zip when it wanted SHASUMS256 and choke on the binary — so there is no combination
-# of ELECTRON_CUSTOM_* vars that gets both requests right. Bypass the whole path:
-# fetch the castlabs zip once ourselves, stage it under the plain-version name that
-# packager expects, and pass --electron-zip-dir. That skips @electron/get's download
-# and checksum steps entirely; the resolved tag is the integrity check.
-ELECTRON_VER=$(node -p "require('./package.json').devDependencies.electron.split('#v')[1].split('+')[0]")
-ELECTRON_ZIP_DIR="${ELECTRON_ZIP_DIR:-${XDG_CACHE_HOME:-$HOME/Library/Caches}/linux-google-apps}"
-mkdir -p "$ELECTRON_ZIP_DIR"
-# --electron-zip-dir looks up the file under the electron version @electron/packager
-# reads from node_modules/electron/package.json, and castlabs publishes that as
-# "42.8.0+wvcus" — so the on-disk name MUST carry the +wvcus suffix; without it
-# packager reports "The specified Electron ZIP file does not exist" and the build
-# stops. The zip's URL basename already carries the same suffix, so download and
-# lookup names cannot drift.
-STAGED_ZIP="$ELECTRON_ZIP_DIR/electron-v${ELECTRON_VER}+wvcus-darwin-${ARCH}.zip"
-if [ ! -s "$STAGED_ZIP" ]; then
-  # ELECTRON_ZIP_URL fully overrides for an internal mirror; ELECTRON_MIRROR still
-  # works as the base if someone had already set it. Neither is required.
-  URL="${ELECTRON_ZIP_URL:-${ELECTRON_MIRROR:-https://github.com/castlabs/electron-releases/releases/download/}v${ELECTRON_VER}+wvcus/electron-v${ELECTRON_VER}+wvcus-darwin-${ARCH}.zip}"
-  echo "==> Downloading Electron $ELECTRON_VER+wvcus (darwin-$ARCH)"
-  curl -fSL --retry 3 -o "$STAGED_ZIP.part" "$URL"
-  mv "$STAGED_ZIP.part" "$STAGED_ZIP"
-fi
-
 . "$DIR/services.conf"
 # Shared with build-linux.sh so both installers agree on what an app can be called.
 . "$DIR/select-services.sh"
@@ -81,6 +50,40 @@ if [ ! -d node_modules ]; then
   # Electron from the registry and quietly replace it. DRM apps would then build fine and
   # simply never play.
   npm install
+fi
+
+# @electron/packager fetches Electron through @electron/get, and neither the default
+# URL builder nor its env-var overrides match what castlabs actually publishes: the
+# release tag carries a +wvcus suffix (v42.8.0+wvcus) and so does the main asset
+# (electron-v42.8.0+wvcus-darwin-arm64.zip), while the checksum file stays at the
+# ordinary SHASUMS256.txt path. ELECTRON_CUSTOM_FILENAME applies to EVERY download
+# @electron/get makes — pointing it at the +wvcus zip makes @electron/get fetch the
+# zip when it wanted SHASUMS256 and choke on the binary — so there is no combination
+# of ELECTRON_CUSTOM_* vars that gets both requests right. Bypass the whole path:
+# fetch the castlabs zip once ourselves, stage it under the plain-version name that
+# packager expects, and pass --electron-zip-dir. That skips @electron/get's download
+# and checksum steps entirely; the resolved tag is the integrity check.
+#
+# Runs AFTER argparse, deliberately: --list and --help must not require node or
+# network, and the earlier revision of this block sat at the top of the file where
+# every invocation paid for it whether it needed to build anything or not.
+ELECTRON_VER=$(node -p "require('./package.json').devDependencies.electron.split('#v')[1].split('+')[0]")
+ELECTRON_ZIP_DIR="${ELECTRON_ZIP_DIR:-${XDG_CACHE_HOME:-$HOME/Library/Caches}/linux-google-apps}"
+mkdir -p "$ELECTRON_ZIP_DIR"
+# --electron-zip-dir looks up the file under the electron version @electron/packager
+# reads from node_modules/electron/package.json, and castlabs publishes that as
+# "42.8.0+wvcus" — so the on-disk name MUST carry the +wvcus suffix; without it
+# packager reports "The specified Electron ZIP file does not exist" and the build
+# stops. The zip's URL basename already carries the same suffix, so download and
+# lookup names cannot drift.
+STAGED_ZIP="$ELECTRON_ZIP_DIR/electron-v${ELECTRON_VER}+wvcus-darwin-${ARCH}.zip"
+if [ ! -s "$STAGED_ZIP" ]; then
+  # ELECTRON_ZIP_URL fully overrides for an internal mirror; ELECTRON_MIRROR still
+  # works as the base if someone had already set it. Neither is required.
+  URL="${ELECTRON_ZIP_URL:-${ELECTRON_MIRROR:-https://github.com/castlabs/electron-releases/releases/download/}v${ELECTRON_VER}+wvcus/electron-v${ELECTRON_VER}+wvcus-darwin-${ARCH}.zip}"
+  echo "==> Downloading Electron $ELECTRON_VER+wvcus (darwin-$ARCH)"
+  curl -fSL --retry 3 -o "$STAGED_ZIP.part" "$URL"
+  mv "$STAGED_ZIP.part" "$STAGED_ZIP"
 fi
 
 rm -rf build && mkdir -p build
