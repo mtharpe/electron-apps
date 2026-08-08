@@ -399,7 +399,7 @@ ICON_THEME="${ICON_THEME:-$(icon_theme_name)}"
 echo "==> Icon theme: $ICON_THEME"
 
 for entry in "${SELECTED[@]}"; do
-  IFS='|' read -r name icon url bid categories related <<< "$entry"
+  IFS='|' read -r name icon url bid categories related drm <<< "$entry"
   slug="$(slugify "$name")"
   echo "==> Building $name"
 
@@ -411,7 +411,8 @@ for entry in "${SELECTED[@]}"; do
   fi
 
   # slug travels into the app so main.js can find styles/<slug>.css without re-deriving it.
-  python3 -c "import json,sys; json.dump({'name':sys.argv[1],'url':sys.argv[2],'slug':sys.argv[3],'related':sys.argv[4]}, open('app-config.json','w'))" "$name" "$url" "$slug" "${related:-}"
+  # drm is a plain boolean the runtime reads to decide whether to wait on Widevine.
+  python3 -c "import json,sys; json.dump({'name':sys.argv[1],'url':sys.argv[2],'slug':sys.argv[3],'related':sys.argv[4],'drm':sys.argv[5]=='1'}, open('app-config.json','w'))" "$name" "$url" "$slug" "${related:-}" "${drm:-}"
   # Becomes this app's WM_CLASS (see above); StartupWMClass in the .desktop file matches it.
   set_product_name "$slug"
 
