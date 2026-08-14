@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, session, shell, Notification, ipcMain, powerMonitor, nativeTheme, dialog, net } = require('electron');
+const { app, BrowserWindow, Menu, session, shell, Notification, ipcMain, powerMonitor, nativeTheme, dialog, net, clipboard } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { execFile, execFileSync, spawn } = require('child_process');
@@ -276,11 +276,70 @@ function attachLoadRecovery(wc) {
   wc.on('destroyed', () => cancelReloadRetry(wc));
 }
 
+// Spell checking was only ever half-present. webPreferences.spellcheck is on, and Chromium
+// does mark misspellings — measured in Google Messages (a bare <textarea>, so spellcheck
+// defaults on) and Messenger (spellcheck="true" on its composer), both showing red
+// underlines, both with an en-US .bdic downloaded into their profile. But Electron ships NO
+// default context menu, so right-clicking an underlined word did nothing at all: no
+// suggestions, no way to apply one, no way to teach it a word. The squiggle was the entire
+// feature. That is what this adds.
+//
+// Built per-event, not once at startup: every item depends on what was clicked, and
+// dictionarySuggestions is only populated when the cursor is actually over a misspelling.
+function attachContextMenu(wc) {
+  wc.on('context-menu', (event, params) => {
+    const spelling = params.dictionarySuggestions.map((word) => ({
+      label: word,
+      click: () => wc.replaceMisspelling(word),
+    }));
+    if (params.misspelledWord) {
+      // Chromium returns no suggestions for a word it cannot get close to. Saying so beats
+      // a menu that silently drops its top section and looks like nothing happened.
+      if (spelling.length === 0) spelling.push({ label: 'No suggestions', enabled: false });
+      spelling.push({
+        label: 'Add to Dictionary',
+        // Per-session, so the word lands in THIS app's profile. Each app has its own
+        // userData dir, so a word taught to Messenger is not known to Gmail.
+        click: () => wc.session.addWordToSpellCheckerDictionary(params.misspelledWord),
+      });
+    }
+
+    const link = params.linkURL
+      ? [{ label: 'Copy Link', click: () => clipboard.writeText(params.linkURL) }]
+      : [];
+
+    // Roles, not hand-rolled clipboard calls: the role handlers target the focused frame,
+    // which is what was right-clicked, and get contenteditable/selection semantics right.
+    const { editFlags } = params;
+    const edit = params.isEditable || params.selectionText
+      ? [
+        { role: 'cut', enabled: editFlags.canCut },
+        { role: 'copy', enabled: editFlags.canCopy },
+        { role: 'paste', enabled: editFlags.canPaste },
+        { role: 'selectAll', enabled: editFlags.canSelectAll },
+      ]
+      : [];
+
+    // Join non-empty sections with separators, rather than emitting separators inline —
+    // inline ones strand a divider at the top or bottom whenever a section turns out empty.
+    const template = [];
+    for (const section of [spelling, link, edit]) {
+      if (section.length === 0) continue;
+      if (template.length > 0) template.push({ type: 'separator' });
+      template.push(...section);
+    }
+    if (template.length === 0) return; // nothing actionable — don't flash an empty menu
+
+    Menu.buildFromTemplate(template).popup({ window: BrowserWindow.fromWebContents(wc) });
+  });
+}
+
 app.on('web-contents-created', (e, wc) => {
   applyCustomStyles(wc);
   manageWindowTitle(wc);
   attachExternalLinkRouting(wc);
   attachLoadRecovery(wc);
+  attachContextMenu(wc);
   wc.on('dom-ready', () => rememberAccountEmail(wc));
 });
 
