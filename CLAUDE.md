@@ -29,7 +29,7 @@ desktop app, is what most of `main.js` and `preload.js` are for.
 | `select-services.sh` | Turns user input (names, menu numbers, `--all`) into the set to build. Shared by both installers. |
 | `build-linux.sh` | Linux: package, install under `$PREFIX`, write `.desktop` + icon ladder, resolve the icon theme. |
 | `build.sh` | macOS: package, install to `~/Applications`, ad-hoc codesign. Dispatches to `build-linux.sh` on Linux. |
-| `main.js` | Main process: per-account windows, header spoofing, link routing, notifications, titles, load recovery. |
+| `main.js` | Main process: per-account windows, header spoofing, link routing, notifications, titles, load recovery, context menu. |
 | `preload.js` | Runs in the page's main world: the stealth layer + notification mirror. |
 | `accounts.html` / `accounts-preload.js` | The Configure Accounts window (ordinary hardened renderer, not the stealth one). |
 | `session-sync.js` | Single sign-on: shares an established Google session between the apps, encrypted, keyed by email. Fail-closed if no keyring. |
@@ -206,6 +206,52 @@ platform *already* delivers shows the user two identical banners. Measured on El
 | `registration.showNotification(...)` from the page | never | mirror it |
 | `showNotification(...)` inside a service worker | never | **cannot be fixed** — worker preloads run in a separate realm |
 
+### Context menu & spell check
+
+**`webPreferences.spellcheck: true` gets you squiggles and nothing else.** Electron ships no
+default context menu, so until `attachContextMenu()` existed, right-clicking a red-underlined
+word did nothing — no suggestions, no way to apply one, no way to teach it a word. The
+underline was the whole feature, which reads to a user as "this app has no spell check".
+That is the report this started from; the engine was never the problem.
+
+What was measured before assuming anything was broken:
+
+| | Google Messages | Messenger |
+|---|---|---|
+| composer element | bare `<textarea>`, no `spellcheck` attr → Blink defaults it **on** | `spellcheck="true"` explicitly |
+| `en-US-*.bdic` in the app profile | present | present |
+| red underlines actually render | yes (screenshot) | yes (screenshot) |
+| right-click offered anything | **no** | **no** |
+
+So diagnose in that order: the dictionary in `<userData>/Dictionaries/` proves the
+spellchecker initialised, and the composer's resolved `el.spellcheck` proves the *page*
+allows checking. Neither proves the user can act on a misspelling.
+
+Two things that are easy to get wrong here:
+
+- **Build the menu per event, not once at startup.** `params.dictionarySuggestions` is only
+  populated when the cursor is over a misspelling; a menu built ahead of time has nothing to
+  put in it.
+- **Join sections with separators instead of emitting separators inline.** A right-click on
+  correctly-spelled text, or on nothing, empties a section — inline separators then strand a
+  divider at the top or bottom of the menu.
+
+`Add to Dictionary` is per-`session`, so a word lands in that app's own profile. Each app has
+its own userData dir, so a word taught to Messenger is not known to Gmail. That is a
+consequence of the one-app-one-profile design, not a bug to fix.
+
+**Verifying it:** dispatch a real right-click over a misspelling via CDP
+(`Input.dispatchMouseEvent` with `button: 'right'`) and check what Chromium hands the
+handler — `misspelledWord` and `dictionarySuggestions`. In a contenteditable, get the word's
+position from a `Range` over its text node; the text does not start at the box's left edge,
+and clicking a fixed offset lands in the padding and reports `misspelledWord: ""`.
+
+The menu's *rendered* appearance cannot be verified the usual way: `Page.captureScreenshot`
+only captures web contents, and a native GTK menu is not in it. GNOME also refuses desktop
+capture under Wayland (`org.gnome.Shell.Screenshot` → `AccessDenied`), so there is currently
+no way to photograph one on this machine. Verify the params and the built template, and say
+that is what was verified.
+
 ### Load recovery
 
 Nothing in Electron retries a failed navigation. `main.js` adds a backoff retry on
@@ -373,6 +419,7 @@ Scripts must stay **bash 3.2 compatible** (macOS still ships it): no associative
 | All apps share one taskbar icon | `WM_CLASS` / `productName` mismatch — rebuild, don't rename files. |
 | Notification has a generic icon | `.desktop` filename must equal the slug. |
 | Sign-in says "browser may not be secure" | Bump `electron` in `package.json` and rebuild; the spoofed version follows automatically. |
+| "No spell check" | Check whether misspellings are *underlined* first. Underlined means the engine is fine and the complaint is really about the context menu; not underlined means the page suppressed it (`el.spellcheck === false`) or no dictionary reached `<userData>/Dictionaries/`. |
 
 Apps enforce a single instance **per user-data dir**, so a second launch just focuses the
 running window. To run an isolated instance for testing, pass
