@@ -214,7 +214,7 @@ word did nothing — no suggestions, no way to apply one, no way to teach it a w
 underline was the whole feature, which reads to a user as "this app has no spell check".
 That is the report this started from; the engine was never the problem.
 
-What was measured before assuming anything was broken:
+What was measured on the two apps the report came from, before assuming anything was broken:
 
 | | Google Messages | Messenger |
 |---|---|---|
@@ -226,6 +226,21 @@ What was measured before assuming anything was broken:
 So diagnose in that order: the dictionary in `<userData>/Dictionaries/` proves the
 spellchecker initialised, and the composer's resolved `el.spellcheck` proves the *page*
 allows checking. Neither proves the user can act on a misspelling.
+
+The handler is attached in `web-contents-created`, so it is app-independent — **one fix
+covers every app**, and a new app in `services.conf` gets it for free. Nothing here is
+per-service. Coverage as it stands, kept separate by *how* each was established:
+
+| App | Confirmed by | Notes |
+|---|---|---|
+| Google Messages | CDP: right-click returned `misspelledWord` + suggestions | `["dispelled"]` for `mispelledwrd` |
+| Messenger | CDP: same, identical template | composer is Lexical, `contenteditable` |
+| Gmail | by hand | |
+| Google Keep | by hand; note body's `el.spellcheck` also measured `true` | |
+| Google Tasks | by hand | its task input was not reachable from the top document by script |
+| Google Calendar | by hand; the people-search input measured `true` | |
+
+Tidal is the one app with nothing worth spell checking, and is untested.
 
 Two things that are easy to get wrong here:
 
@@ -251,6 +266,18 @@ only captures web contents, and a native GTK menu is not in it. GNOME also refus
 capture under Wayland (`org.gnome.Shell.Screenshot` → `AccessDenied`), so there is currently
 no way to photograph one on this machine. Verify the params and the built template, and say
 that is what was verified.
+
+**These apps are signed into real accounts. Prefer a read-only probe.** Reading
+`el.spellcheck` answers "will spell checking work on this page" without touching anything;
+synthetic typing answers the same question and can cost the user real data. Driving keystrokes
+into Keep to test this wrote a junk note into the account, and a `Ctrl+A` whose focus had
+silently landed on the note grid rather than a text field selected all 708 notes — Keep binds
+select-all to the grid, and one keystroke further would have been destructive. If you must
+type: assert the focused element is the one you think it is *immediately before* each
+keystroke batch, never count backspaces to undo (a right-click selects the misspelled word, so
+the first backspace eats the selection and the rest run off the end), and re-read the app's
+own state afterwards rather than trusting the edit. Test against a scratch
+`--user-data-dir` when the check does not require the user's real content.
 
 ### Load recovery
 
