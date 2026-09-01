@@ -519,8 +519,14 @@ per-account session, so they stay in the right cookie jar.
 macOS finds Chrome by bundle name (`open -a "Google Chrome"`). Linux has no such lookup, so
 the app probes `PATH` once at startup for `google-chrome`, `chromium`, `brave-browser` and
 friends, and falls back to `xdg-open` (your actual default browser) if none are found. Set
-**`GOOGLE_APP_BROWSER`** to a command or absolute path to override the probe on either
+**`ELECTRON_APPS_BROWSER`** to a command or absolute path to override the probe on either
 platform.
+
+> **Renamed.** `ELECTRON_APPS_BROWSER` and `ELECTRON_APPS_AUTH_DOMAINS` were
+> `GOOGLE_APP_BROWSER` and `GOOGLE_APP_AUTH_DOMAINS` until this project stopped being a
+> Google-only one. The old names still work — they are read when the new name is unset — so
+> an existing shell profile keeps working. Prefer the new spelling; the fallback will go
+> away eventually.
 
 ### Chrome profile routing
 `google-chrome <url>` drops the link into whichever profile window Chrome currently has
@@ -661,7 +667,7 @@ Ping Identity, OneLogin, Duo, Auth0, JumpCloud, CyberArk**.
 
 If your company hosts SSO on a **vanity domain** (e.g. `login.example.com`) that isn't one of
 those, add it — no rebuild needed — by either:
-- setting `GOOGLE_APP_AUTH_DOMAINS` (comma/space-separated suffixes) in the app's
+- setting `ELECTRON_APPS_AUTH_DOMAINS` (comma/space-separated suffixes) in the app's
   environment, or
 - creating a JSON array at the app's config dir, e.g.
   ```json
@@ -690,10 +696,10 @@ are correctly treated as external.
 | **Linux:** all the apps share one taskbar icon | You're running a build from before the per-service `WM_CLASS` fix — rebuild with `./build-linux.sh`. |
 | **Linux:** notifications show a generic icon / wrong app name | The `.desktop` filename must match the app's slug (see **Desktop integration on Linux**). Rebuild rather than renaming files by hand. |
 | **Linux:** Calendar reminder never appeared | Calendar only fires reminders with a Calendar view open. If it was open, see [Notification paths on Linux](#notification-paths-on-linux) for the one path that can't be delivered. |
-| **Linux:** links open in the wrong browser | The app prefers Chrome/Chromium on `PATH`, else your `xdg-open` default. Set `GOOGLE_APP_BROWSER=/path/to/browser` to pin it. |
+| **Linux:** links open in the wrong browser | The app prefers Chrome/Chromium on `PATH`, else your `xdg-open` default. Set `ELECTRON_APPS_BROWSER=/path/to/browser` to pin it. |
 | **Linux:** `gmail: command not found` | `~/.local/bin` isn't on your `PATH` (the build warns about this), or launch from the app menu instead. |
 | Need to re-login everywhere | Sessions are per-app and per-account-slot by design (full isolation). |
-| Corporate (SSO) sign-in opens in Chrome / can't complete | The IdP isn't recognized. If it's on a company vanity domain, add it via `GOOGLE_APP_AUTH_DOMAINS` or `auth-domains.json` (see **Enterprise SSO** above), then retry. |
+| Corporate (SSO) sign-in opens in Chrome / can't complete | The IdP isn't recognized. If it's on a company vanity domain, add it via `ELECTRON_APPS_AUTH_DOMAINS` or `auth-domains.json` (see **Enterprise SSO** above), then retry. |
 | Clicking a link in a **second** account's window does nothing | Fixed — link routing now runs in every window, not just the first. Relaunch the rebuilt app (⌘Q first). |
 
 ---

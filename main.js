@@ -1134,12 +1134,17 @@ const IDP_HOST_SUFFIXES = [
 
 // Companies often host SSO on a vanity domain (e.g. login.example.com) no built-in list can
 // predict. Let users add their own suffixes WITHOUT rebuilding: a comma/space-separated env
-// var (GOOGLE_APP_AUTH_DOMAINS) and/or a JSON array at <userData>/auth-domains.json. Read
+// var (ELECTRON_APPS_AUTH_DOMAINS) and/or a JSON array at <userData>/auth-domains.json. Read
 // once at startup.
+//
+// GOOGLE_APP_AUTH_DOMAINS is the pre-rename spelling, still honoured so an existing setup
+// does not silently lose its suffixes the first time it runs a rebuilt app. Consulted only
+// when the current name is unset; drop it once nobody is on a build older than this one.
 function loadExtraAuthSuffixes() {
   const out = [];
   try {
-    if (process.env.GOOGLE_APP_AUTH_DOMAINS) out.push(...process.env.GOOGLE_APP_AUTH_DOMAINS.split(/[,\s]+/));
+    const env = process.env.ELECTRON_APPS_AUTH_DOMAINS || process.env.GOOGLE_APP_AUTH_DOMAINS;
+    if (env) out.push(...env.split(/[,\s]+/));
   } catch (e) { /* ignore */ }
   try {
     const f = path.join(app.getPath('userData'), 'auth-domains.json');
@@ -1164,8 +1169,9 @@ function isAuthHost(host) {
 // macOS resolves "Google Chrome" by bundle name via `open -a`; Linux has no such lookup,
 // so we probe PATH for the usual Chrome/Chromium executables ourselves. Either way the
 // last resort is shell.openExternal (LaunchServices / xdg-open), which honours whatever
-// the user actually set as their default browser. GOOGLE_APP_BROWSER overrides the probe
-// with an explicit command for anyone who wants a different browser (or a flatpak wrapper).
+// the user actually set as their default browser. ELECTRON_APPS_BROWSER overrides the probe
+// with an explicit command for anyone who wants a different browser (or a flatpak wrapper);
+// GOOGLE_APP_BROWSER is the pre-rename spelling and is still honoured as a fallback.
 const LINUX_BROWSERS = [
   'google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser',
   'brave-browser', 'microsoft-edge',
@@ -1176,11 +1182,11 @@ const LINUX_BROWSERS = [
 // doesn't exit until the user quits it, so an exit-code fallback would sit armed for
 // hours and then re-open a long-forgotten link in a second browser.
 function resolveBrowser() {
-  const explicit = String(process.env.GOOGLE_APP_BROWSER || '').trim();
+  const explicit = String(process.env.ELECTRON_APPS_BROWSER || process.env.GOOGLE_APP_BROWSER || '').trim();
   const names = explicit ? [explicit] : (IS_MAC ? [] : LINUX_BROWSERS);
   const dirs = String(process.env.PATH || '').split(path.delimiter).filter(Boolean);
   for (const name of names) {
-    // An absolute/relative path in GOOGLE_APP_BROWSER is used as given.
+    // An absolute/relative path in ELECTRON_APPS_BROWSER is used as given.
     if (name.includes(path.sep)) {
       try { fs.accessSync(name, fs.constants.X_OK); return name; } catch (e) { continue; }
     }
@@ -1194,7 +1200,7 @@ function resolveBrowser() {
 const BROWSER_CMD = resolveBrowser();
 
 // --profile-directory is a Chromium switch. Handing it to a browser that doesn't understand
-// it (Firefox, or anything set via GOOGLE_APP_BROWSER) would at best be ignored and at worst
+// it (Firefox, or anything set via ELECTRON_APPS_BROWSER) would at best be ignored and at worst
 // be treated as a URL, so it is only ever passed to a browser known to take it.
 const CHROMIUM_BROWSER_RE = /(^|[^a-z])(chrome|chromium|brave|msedge|microsoft-edge|vivaldi|opera)([^a-z]|$)/i;
 

@@ -1,10 +1,10 @@
 {
-  "name": "google-standalone-app",
-  "productName": "GoogleApp",
+  "name": "electron-apps",
+  "productName": "ElectronApp",
   "version": "1.0.0",
   "main": "main.js",
   "author": "Mike Tharpe",
-  "description": "Standalone Google web app with per-window account isolation",
+  "description": "Standalone desktop app wrapping one web app, with per-window account isolation",
   "license": "MIT",
   "devDependencies": {
     "@electron/packager": "^20.1.1",

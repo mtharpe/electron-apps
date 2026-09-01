@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Rebuild & install the standalone Google apps. Which apps is up to you — see
-# services.conf for the full set, or run --list.
+# Rebuild & install the standalone web apps. Which apps is up to you — see
+# services.conf for the full set, or run --list. Nothing here is Google-specific; the
+# bundled set just happens to be mostly Google's.
 #
 # Usage:  ./build.sh                 # pick from a menu (all, if not run in a terminal)
 #         ./build.sh gmail keep      # just those; name by short key, slug or full name
@@ -27,7 +28,7 @@ ARCH="${ARCH:-$([ "$(uname -m)" = "x86_64" ] && echo x64 || echo arm64)}"
 # Shared with build-linux.sh so both installers agree on what an app can be called.
 . "$DIR/select-services.sh"
 
-usage() { sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; }
 
 WANTED=()
 while [ "$#" -gt 0 ]; do
@@ -68,8 +69,19 @@ fi
 # network, and the earlier revision of this block sat at the top of the file where
 # every invocation paid for it whether it needed to build anything or not.
 ELECTRON_VER=$(node -p "require('./package.json').devDependencies.electron.split('#v')[1].split('+')[0]")
-ELECTRON_ZIP_DIR="${ELECTRON_ZIP_DIR:-${XDG_CACHE_HOME:-$HOME/Library/Caches}/linux-google-apps}"
+ELECTRON_ZIP_DIR="${ELECTRON_ZIP_DIR:-${XDG_CACHE_HOME:-$HOME/Library/Caches}/electron-apps}"
 mkdir -p "$ELECTRON_ZIP_DIR"
+# See build-linux.sh: the cache used to be keyed "linux-google-apps" — a Linux-flavoured
+# name for a project that is not Google-specific, used verbatim here on macOS. Adopt an
+# existing download rather than re-fetching ~100 MB after the rename.
+LEGACY_ZIP_DIR="${XDG_CACHE_HOME:-$HOME/Library/Caches}/linux-google-apps"
+if [ -d "$LEGACY_ZIP_DIR" ] && [ "$LEGACY_ZIP_DIR" != "$ELECTRON_ZIP_DIR" ]; then
+  for legacy in "$LEGACY_ZIP_DIR"/*.zip; do
+    [ -s "$legacy" ] || continue
+    [ -s "$ELECTRON_ZIP_DIR/$(basename "$legacy")" ] || mv "$legacy" "$ELECTRON_ZIP_DIR/"
+  done
+  rmdir "$LEGACY_ZIP_DIR" 2>/dev/null || true
+fi
 # --electron-zip-dir looks up the file under the electron version @electron/packager
 # reads from node_modules/electron/package.json, and castlabs publishes that as
 # "42.8.0+wvcus" — so the on-disk name MUST carry the +wvcus suffix; without it
