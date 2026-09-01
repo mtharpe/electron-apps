@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
-# Choosing which services to act on. Sourced by build.sh (macOS) and build-linux.sh
+# The shared half of the two installers. Sourced by build.sh (macOS) and build-linux.sh
 # AFTER services.conf, which defines SERVICES.
+#
+# Two things live here, both for the same reason — the platforms must not disagree:
+#   - choosing which services to act on (slugify, list_services, resolve_services)
+#   - IGNORE_FLAGS, the list of paths kept OUT of the packaged app (see the end of the file)
 #
 # These apps are one person's set. Anyone else is likely to want a subset, so nothing here
 # assumes "all" — the caller passes whatever the user asked for and gets back SELECTED.
@@ -132,3 +136,39 @@ resolve_services() {
     exit 1
   fi
 }
+
+# --- what does NOT go into the packaged app ------------------------------------------
+#
+# Shared by both installers so a path excluded on one platform cannot quietly ship on the
+# other. That drift was real: build-linux.sh excluded services.conf and build.sh did not.
+#
+# electron-packager does NOT read .gitignore, so "git-clean" is no guarantee that a file
+# stays out of the bundle. .remember/ is the case that proves it — Claude Code session logs,
+# gitignored via *.log, were being packaged into every app.asar (measured: 64 KB of
+# transcript logs in all six installed apps). Anything generated beside the source and not
+# needed at runtime has to be named here explicitly.
+#
+# Patterns are regexes matched against the path relative to the project root, with a leading
+# slash (e.g. "/docs/apps.png"). The first two are deliberately loose substrings and have
+# been that way since the beginning: "/icons" also happens to exclude docs/icons/, which is
+# why only docs/apps.png was ever shipping. New entries are anchored.
+PACKAGER_IGNORES=(
+  "/build"
+  "/icons"
+  "\.sh$"
+  "\.md$"
+  "^/docs($|/)"
+  "^/services\.conf$"
+  "^/\.remember($|/)"
+  "^/\.gitignore$"
+  "^/node_modules/\.package-lock\.json$"   # npm's prune leftover, ~24 KB, unread at runtime
+)
+
+# electron-packager takes one --ignore per pattern. Built as an array (not a string) so the
+# regexes survive word splitting intact, and with the index-append idiom rather than += so
+# this stays bash 3.2 compatible for macOS.
+IGNORE_FLAGS=()
+for _pat in "${PACKAGER_IGNORES[@]}"; do
+  IGNORE_FLAGS[${#IGNORE_FLAGS[@]}]="--ignore=$_pat"
+done
+unset _pat
