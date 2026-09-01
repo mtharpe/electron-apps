@@ -11,8 +11,8 @@ rediscover it.
 ## What this repo is
 
 Each app is one Electron binary wrapping one web URL, packaged per service by a build
-script. There is no framework and no runtime dependency: `main.js` + `preload.js` are the
-whole program, and `services.conf` is the list of apps.
+script. There is no framework and no runtime dependency: `main.js` + `lib/` + `preload.js`
+are the whole program, and `services.conf` is the list of apps.
 
 **Nothing here is Google-specific.** Any URL can be an app; the bundled set just happens to
 be Google's. Most web apps need only a `services.conf` line and an icon, and the stealth
@@ -21,7 +21,7 @@ layer is inert for them.
 The non-obvious code exists for sites that resist being embedded. A browser PWA stays tied
 to a browser profile; a plain Nativefier wrapper gets blocked at Google sign-in with *"This
 browser or app may not be secure."* Defeating that, while still behaving like a normal
-desktop app, is what most of `main.js` and `preload.js` are for.
+desktop app, is what most of `lib/` and `preload.js` are for.
 
 | File | Role |
 |---|---|
@@ -29,7 +29,18 @@ desktop app, is what most of `main.js` and `preload.js` are for.
 | `select-services.sh` | Turns user input (names, menu numbers, `--all`) into the set to build. Shared by both installers. |
 | `build-linux.sh` | Linux: package, install under `$PREFIX`, write `.desktop` + icon ladder, resolve the icon theme. |
 | `build.sh` | macOS: package, install to `~/Applications`, ad-hoc codesign. Dispatches to `build-linux.sh` on Linux. |
-| `main.js` | Main process: per-account windows, header spoofing, link routing, notifications, titles, load recovery, context menu. |
+| `main.js` | Entry point only: creates the windows, wires the modules together, owns the app lifecycle. ~320 lines. |
+| `lib/config.js` | This app's identity, read from `app-config.json`. `ROOT` is here — modules under `lib/` must resolve bundled files against it, not `__dirname`. |
+| `lib/util.js` | `wait`, `logRecovery`, `hasSuffix`. Depends on nothing. |
+| `lib/window-registry.js` | Owns the slot→window map and the Accounts window. Depends on nothing — that is the point; it is what keeps theme/accounts/recovery from requiring each other. |
+| `lib/chromium.js` | Stealth UA + client hints, `STEALTH_WEBPREFS`, per-session header spoof, the Widevine wait. |
+| `lib/theme.js` | Light/dark: the appearance portal, the GTK frame, the pinned preference. |
+| `lib/accounts.js` | Account slots: `accounts.json`, Chrome's profile list, labels, slot identity. The data layer — knows nothing about menus or windows. |
+| `lib/routing.js` | Whether a URL loads in-app or goes to the real browser, and how it gets there. |
+| `lib/notifications.js` | Native notifications and the web-notification mirror. |
+| `lib/recovery.js` | Retry after a failed navigation; reload after the machine wakes. |
+| `lib/page-tweaks.js` | Per-webContents page adjustments: custom CSS, window title, context menu. |
+| `lib/menu.js` | The application menu. |
 | `preload.js` | Runs in the page's main world: the stealth layer + notification mirror. |
 | `accounts.html` / `accounts-preload.js` | The Configure Accounts window (ordinary hardened renderer, not the stealth one). |
 | `session-sync.js` | Single sign-on: shares an established Google session between the apps, encrypted, keyed by email. Fail-closed if no keyring. |
@@ -175,10 +186,40 @@ localhost debugging socket otherwise.
 
 Things that look like they could be simplified, but cannot.
 
+### The module graph is acyclic on purpose
+
+`main.js` was one 1,700-line file. It is now an entry point over `lib/`, and the split has
+exactly two places where the obvious wiring would close a require cycle. Both are broken the
+same way — **injection from `main.js`, never a back-import**:
+
+- `theme.js` and `accounts.js` each need the application menu rebuilt when they change, but
+  `menu.js` reads *from* both. So they take a callback: `theme.onChanged(buildMenu)` and
+  `accounts.onChanged(buildMenu)`, registered once in `main.js`. Inside those modules the
+  call site is `changedCb()`, not `buildMenu()`.
+- `menu.js` needs to open account windows, which are created in `main.js`. So it takes them
+  through `menu.init({ openAccountWindow, nextFreeSlot, openAccountsWindow })`.
+
+`lib/window-registry.js` exists for the same reason: theme, accounts and recovery all need
+"the window for slot N", and routing that question through each other is what would make the
+graph cyclic. It therefore **depends on nothing**; keep it that way. Note its accessor pair
+for the Accounts window — `accountsWindow` is a `let`, and `require()` copies a value rather
+than binding a slot, so a bare export would freeze at `null`.
+
+Two traps when moving code into `lib/`:
+
+- **`__dirname` now points at `lib/`.** Anything resolving a bundled file (`preload.js`,
+  `styles/`, `app-icon.png`, `app-config.json`) must use `ROOT` from `lib/config.js`.
+- **Module scope now runs at require time, which is before `app.setName()`.** In the single
+  file, `const EXTRA_AUTH_SUFFIXES = loadExtraAuthSuffixes()` sat *below* `setName`, so
+  `app.getPath('userData')` was already correct. As a module it would run first and read
+  `auth-domains.json` out of the wrong directory — and finding nothing there is
+  indistinguishable from the normal empty case, so it would never look broken. It is lazy
+  now. Anything else touching `userData` at module scope needs the same treatment.
+
 ### The stealth layer
 
-`main.js` forces a Chrome User-Agent plus matching `Sec-CH-UA` client-hint headers on every
-request; `preload.js` patches the page-side fingerprint (`navigator.userAgentData`,
+`lib/chromium.js` forces a Chrome User-Agent plus matching `Sec-CH-UA` client-hint headers on
+every request; `preload.js` patches the page-side fingerprint (`navigator.userAgentData`,
 `navigator.webdriver`, `window.chrome`, and scrubs Electron/Node globals). **Both halves are
 required** — UA spoofing alone is what Nativefier does, and it is not enough.
 
@@ -281,7 +322,7 @@ own state afterwards rather than trusting the edit. Test against a scratch
 
 ### Load recovery
 
-Nothing in Electron retries a failed navigation. `main.js` adds a backoff retry on
+Nothing in Electron retries a failed navigation. `lib/recovery.js` adds a backoff retry on
 `did-fail-load`. Two non-obvious details, both found by measurement:
 
 - **A failed navigation still commits Chromium's error document, which fires
@@ -371,7 +412,7 @@ await a.createMediaKeys();
 injected on every document load, but **only on the app's own host** — a Gmail rule has no
 business running on the sign-in page or an SSO provider's.
 
-This was Gmail-specific code in `main.js` until it became a file convention. If a new app
+This was Gmail-specific code in the main process until it became a file convention. If a new app
 needs a tweak, add a stylesheet; do not add a hostname branch.
 
 `app-config.json` carries the `slug` for this, written by both build scripts.
