@@ -93,24 +93,43 @@ const ACCOUNT_TITLE_JS = `(function(){
   return s(t);
 })()`;
 
+// Gmail rewrites its document title on every unread-count change, and each one used to cost
+// a synchronous-looking round trip into the renderer to re-scrape the account name. Coalesce
+// the burst: the title we want is derived from the account, not from the count, so the last
+// event in a flurry is the only one worth answering. Short enough to be imperceptible.
+const TITLE_SETTLE_MS = 250;
+
 function manageWindowTitle(wc) {
+  let settleTimer = null;
+  let lastApplied = null;
+
+  const setTitle = (label) => {
+    if (!label || label === lastApplied) return; // nothing changed — skip the native call
+    const win = BrowserWindow.fromWebContents(wc);
+    if (win && !win.isDestroyed()) { win.setTitle(label); lastApplied = label; }
+  };
+
   const apply = () => {
     // A configured account name (or the name of the Chrome profile it maps to) is a
     // deliberate choice by the user and outranks anything scraped from the page.
     const pinned = accountLabel(slotOf(wc));
-    if (pinned) {
-      const win = BrowserWindow.fromWebContents(wc);
-      if (win && !win.isDestroyed()) win.setTitle(pinned);
-      return;
-    }
-    wc.executeJavaScript(ACCOUNT_TITLE_JS, true).then((label) => {
-      const win = BrowserWindow.fromWebContents(wc);
-      if (win && !win.isDestroyed() && label) win.setTitle(label);
-    }).catch(() => { /* ignore */ });
+    if (pinned) { setTitle(pinned); return; }
+    wc.executeJavaScript(ACCOUNT_TITLE_JS, true)
+      .then(setTitle)
+      .catch(() => { /* ignore */ });
   };
+
+  const applySoon = () => {
+    if (settleTimer) return;
+    settleTimer = setTimeout(() => { settleTimer = null; apply(); }, TITLE_SETTLE_MS);
+  };
+
   // Stop Electron from auto-applying Google's full page title, then set our short one.
-  wc.on('page-title-updated', (e) => { e.preventDefault(); apply(); });
-  wc.on('dom-ready', apply);
+  wc.on('page-title-updated', (e) => { e.preventDefault(); applySoon(); });
+  // A fresh document gets the immediate path: there is no burst to coalesce, and waiting
+  // would leave the window showing the PREVIOUS page's title for a beat.
+  wc.on('dom-ready', () => { lastApplied = null; apply(); });
+  wc.on('destroyed', () => { if (settleTimer) { clearTimeout(settleTimer); settleTimer = null; } });
 }
 
 // Nothing in Electron retries a navigation that dies — DNS not up yet at login, the
@@ -180,7 +199,16 @@ const RESUME_MAX_ATTEMPTS = 40;
 function probeOrigin() {
   return new Promise((resolve) => {
     let settled = false;
-    const finish = (ok) => { if (!settled) { settled = true; resolve(ok); } };
+    // The deadline is cleared on the way out, not just guarded by `settled`. recoverAfterResume
+    // runs up to RESUME_MAX_ATTEMPTS probes, so leaving each one's timer armed left a trail of
+    // pending 5s timers firing abort() at requests that had already finished.
+    let timer = null;
+    const finish = (ok) => {
+      if (settled) return;
+      settled = true;
+      if (timer) { clearTimeout(timer); timer = null; }
+      resolve(ok);
+    };
     let req;
     // Any HTTP response means the server answered; the status is irrelevant, a redirect or
     // even a 4xx proves the path is open.
@@ -193,7 +221,7 @@ function probeOrigin() {
       finish(false);
       return;
     }
-    setTimeout(() => { try { req.abort(); } catch (e) {} finish(false); }, REACHABILITY_TIMEOUT_MS);
+    timer = setTimeout(() => { try { req.abort(); } catch (e) {} finish(false); }, REACHABILITY_TIMEOUT_MS);
   });
 }
 
