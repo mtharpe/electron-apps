@@ -426,8 +426,7 @@ for entry in "${SELECTED[@]}"; do
   npx electron-packager . "$name" --platform=linux --arch="$ARCH" \
     --executable-name="$slug" --app-version=1.0.0 \
     --electron-zip-dir="$ELECTRON_ZIP_DIR" \
-    --ignore="/build" --ignore="/icons" --ignore="\.sh$" --ignore="\.md$" \
-    --ignore="/services\.conf$" \
+    "${IGNORE_FLAGS[@]}" \
     --out="$DIR/build" --overwrite >/dev/null
 
   staged="$DIR/build/$name-linux-$ARCH"

@@ -97,7 +97,7 @@ for entry in "${SELECTED[@]}"; do
   npx electron-packager . "$name" --platform=darwin --arch="$ARCH" \
     --icon="$DIR/icons/$icon.icns" --app-bundle-id="$bid" --app-version=1.0.0 \
     --electron-zip-dir="$ELECTRON_ZIP_DIR" \
-    --ignore="/build" --ignore="/icons" --ignore="\.sh$" --ignore="\.md$" \
+    "${IGNORE_FLAGS[@]}" \
     --out="$DIR/build" --overwrite >/dev/null
   rm -rf "$HOME/Applications/$name.app"
   cp -R "$DIR/build/$name-darwin-$ARCH/$name.app" "$HOME/Applications/"
