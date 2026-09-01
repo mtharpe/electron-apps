@@ -709,6 +709,11 @@ function persistSlots(slotNumbers) {
     onDisk = {};
   }
   for (const n of slotNumbers) {
+    // Belt and braces against the disagreement nextFreeSlot() used to create: a slot the
+    // Accounts window cannot render must never reach the shared file, whatever called this.
+    // Reading is deliberately NOT bounded (see parseAccounts) — an out-of-range slot already
+    // on disk from an older build stays readable rather than being silently destroyed here.
+    if (!Number.isInteger(n) || n < 1 || n > ACCOUNT_SLOTS) continue;
     const cfg = accountConfig(n);
     // A slot carrying no information is dropped rather than written as an empty record.
     if (!cfg.name && !cfg.email && (!cfg.chromeProfile || cfg.chromeProfile === PROFILE_AUTO)) {
@@ -1360,8 +1365,17 @@ function openAccountWindow(n) {
   return win;
 }
 
+// ACCOUNT_SLOTS is the bound, not an arbitrary ceiling: this used to scan to 50, which meant
+// "New Account Window" past the sixth built a slot nothing else in the app could reach. The
+// Accounts window only renders slots 1..ACCOUNT_SLOTS and accounts:save drops anything above
+// it, so slot 7 could never be named — yet rememberAccountEmail happily persisted a detected
+// address for it into the SHARED accounts.json, where every app then read it back forever.
+// The write path and the UI path have to agree about how many slots exist.
+//
+// With every slot occupied this returns 1, and openAccountWindow focuses that window rather
+// than opening anything — the honest outcome of "there is no free slot".
 function nextFreeSlot() {
-  for (let i = 1; i <= 50; i++) {
+  for (let i = 1; i <= ACCOUNT_SLOTS; i++) {
     const w = windows.get(i);
     if (!w || w.isDestroyed()) return i;
   }
