@@ -88,12 +88,14 @@
     delete window.Buffer;
   } catch (e) {}
 
-  // 5) Plugins/mimeTypes: headless/embedded often report 0; give it a non-empty length.
-  try {
-    if (navigator.plugins && navigator.plugins.length === 0) {
-      def(navigator, 'plugins', () => ({ length: 1, 0: { name: 'PDF Viewer' } }));
-    }
-  } catch (e) {}
+  // 5) navigator.plugins needs no patch here. There used to be one, guarded on
+  //    `navigator.plugins.length === 0` on the theory that an embedded Chromium reports an
+  //    empty list. Measured on this build (Chromium 148) at accounts.google.com: length is 5
+  //    — ["PDF Viewer", "Chrome PDF Viewer", "Chromium PDF Viewer", "Microsoft Edge PDF
+  //    Viewer", "WebKit built-in PDF"], the set the HTML spec now requires every browser to
+  //    hardcode — and it is a genuine PluginArray. The guard never fired, so the patch was
+  //    dead code; worse, had it fired it would have replaced a PluginArray with a plain
+  //    object, which is itself a fingerprinting tell.
 
   // 6) Force web Notification permission to "granted". Web apps like Google Calendar
   //    check Notification.permission before firing a desktop notification; if it isn't
