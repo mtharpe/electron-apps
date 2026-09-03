@@ -42,3 +42,22 @@
  * 911px but the message list stayed pinned at max-height: 860px.
  */
 * { --header-height: 5px !important; }
+
+/* The `*` override reaches inside dialogs too, and Facebook's Media viewer (opened by
+ * clicking a photo attachment) positions its top control row with
+ *   top: calc((var(--header-height) - 40px) / 2)
+ * on a fixed container. At 5px that computes to -17.5px and pushes the Close, Download and
+ * Forward buttons above the viewport — the download/forward icons peek out cropped and the
+ * close X disappears entirely. Restoring 56px inside the dialog lands the row at top: 8px
+ * where Facebook designed it. Measured behind a real login via CDP: with the rule off,
+ * Close rect { top: -17.5, bottom: 22.5 }; with it on, { top: 8, bottom: 48 }. The dialog
+ * itself still fills the viewport (1460×916 either way), so the token change is confined
+ * to the control-row math it was written for.
+ *
+ * Scoped narrowly to the media viewer rather than to `[role="dialog"]` broadly: this is
+ * the only dialog observed misbehaving, and other dialogs (menus, popovers) may not want
+ * their inherited --header-height replaced. Both selectors carry !important because the
+ * `*` rule above does, and higher specificity wins only at the same importance level.
+ */
+[role="dialog"][aria-label="Media viewer"],
+[role="dialog"][aria-label="Media viewer"] * { --header-height: 56px !important; }
