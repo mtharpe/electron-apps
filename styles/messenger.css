@@ -20,3 +20,25 @@
  */
 
 [role="banner"] { display: none !important; }
+
+/* Hiding the banner does not reclaim the space it occupied — the app still starts 56px down
+ * with a matching 56px of dead space above it. Facebook pins the banner and sizes the whole
+ * app around it from one design token, --header-height (56px on :root). Measured behind a
+ * real login: that token drives the pane row's `top` AND every height in the layout —
+ * `calc(100vh - var(--header-height) - …)` recurs throughout Facebook's stylesheet
+ * (.x4jqwm7, .x85a59c, .x20eyyc, .x1wlxzsl …). So overriding the token closes the gap and
+ * regrows the panes in a single declaration.
+ *
+ * Overriding `top` alone is NOT enough, and looks like it works: the gap moves to the bottom
+ * instead, because the message list keeps its max-height of calc(100vh - 56px). That was the
+ * first attempt here; it was caught by screenshotting the bottom of the window, not by
+ * reading the DOM, where every container correctly reported bottom: 916.
+ *
+ * 5px rather than 0 so the panes do not butt against the title bar.
+ *
+ * It must be `*`, not `:root`: Messenger re-declares --header-height: 56px on its own theme
+ * wrapper (the .__fb-dark-mode div under body), which shadows a :root override for
+ * everything inside the app. Measured — with :root alone the outer containers moved to
+ * 911px but the message list stayed pinned at max-height: 860px.
+ */
+* { --header-height: 5px !important; }
