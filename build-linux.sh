@@ -417,7 +417,7 @@ ICON_THEME="${ICON_THEME:-$(icon_theme_name)}"
 echo "==> Icon theme: $ICON_THEME"
 
 for entry in "${SELECTED[@]}"; do
-  IFS='|' read -r name icon url bid categories related drm <<< "$entry"
+  IFS='|' read -r name icon url bid categories related drm paths <<< "$entry"
   slug="$(slugify "$name")"
   echo "==> Building $name"
 
@@ -430,7 +430,10 @@ for entry in "${SELECTED[@]}"; do
 
   # slug travels into the app so main.js can find styles/<slug>.css without re-deriving it.
   # drm is a plain boolean the runtime reads to decide whether to wait on Widevine.
-  python3 -c "import json,sys; json.dump({'name':sys.argv[1],'url':sys.argv[2],'slug':sys.argv[3],'related':sys.argv[4],'drm':sys.argv[5]=='1'}, open('app-config.json','w'))" "$name" "$url" "$slug" "${related:-}" "${drm:-}"
+  # paths is a comma/space-separated URL-path allowlist for services tenanted inside a
+  # larger site (see services.conf); empty for the common case where the app owns its
+  # whole domain.
+  python3 -c "import json,sys; json.dump({'name':sys.argv[1],'url':sys.argv[2],'slug':sys.argv[3],'related':sys.argv[4],'drm':sys.argv[5]=='1','paths':sys.argv[6]}, open('app-config.json','w'))" "$name" "$url" "$slug" "${related:-}" "${drm:-}" "${paths:-}"
   # Becomes this app's WM_CLASS (see above); StartupWMClass in the .desktop file matches it.
   set_product_name "$slug"
 
