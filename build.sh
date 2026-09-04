@@ -100,12 +100,15 @@ fi
 
 rm -rf build && mkdir -p build
 for entry in "${SELECTED[@]}"; do
-  IFS='|' read -r name icon url bid categories related drm <<< "$entry"
+  IFS='|' read -r name icon url bid categories related drm paths <<< "$entry"
   echo "==> Building $name"
   # slug travels into the app so main.js can find styles/<slug>.css without re-deriving it.
   # drm is a plain boolean the runtime reads to decide whether to wait on Widevine.
+  # paths is a comma/space-separated URL-path allowlist for services tenanted inside a
+  # larger site (see services.conf); empty for the common case where the app owns its
+  # whole domain.
   slug="$(slugify "$name")"
-  /usr/bin/python3 -c "import json,sys; json.dump({'name':sys.argv[1],'url':sys.argv[2],'slug':sys.argv[3],'related':sys.argv[4],'drm':sys.argv[5]=='1'}, open('app-config.json','w'))" "$name" "$url" "$slug" "${related:-}" "${drm:-}"
+  /usr/bin/python3 -c "import json,sys; json.dump({'name':sys.argv[1],'url':sys.argv[2],'slug':sys.argv[3],'related':sys.argv[4],'drm':sys.argv[5]=='1','paths':sys.argv[6]}, open('app-config.json','w'))" "$name" "$url" "$slug" "${related:-}" "${drm:-}" "${paths:-}"
   npx electron-packager . "$name" --platform=darwin --arch="$ARCH" \
     --icon="$DIR/icons/$icon.icns" --app-bundle-id="$bid" --app-version=1.0.0 \
     --electron-zip-dir="$ELECTRON_ZIP_DIR" \
