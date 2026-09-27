@@ -29,7 +29,7 @@ const {
   refreshAccountPresentation,
 } = require('./lib/accounts');
 const accountsModule = require('./lib/accounts');
-const { attachExternalLinkRouting } = require('./lib/routing');
+const { attachExternalLinkRouting, isFirstPartyHost } = require('./lib/routing');
 const { nativeNotification } = require('./lib/notifications');
 const { attachLoadRecovery, recoverAfterResume } = require('./lib/recovery');
 const {
@@ -59,7 +59,7 @@ function openAccountWindow(n) {
 
   const partition = 'persist:account-' + n; // isolated, persistent cookie jar per account
   const sess = session.fromPartition(partition);
-  spoofSession(sess);
+  spoofSession(sess, isFirstPartyHost);
   // Remember which partition this session belongs to so attachExternalLinkRouting can keep
   // any allowed child window (account switcher, SSO popup) in the same cookie jar.
   sess.__partition = partition;
