@@ -400,7 +400,7 @@ resists being embedded, something it will actually sign you into.
 | `preload.js` | Runs in the page's main world; the **stealth layer** + the client-side **notification mirror**. |
 | `accounts.html` | The **Configure Accounts…** window: a name field and a Chrome profile dropdown per account slot. |
 | `accounts-preload.js` | Context-isolated bridge for that window — exposes load / save / close and nothing else. |
-| `services.conf` | The service list (`name \| icon \| url \| bundle-id \| categories`), shared by both build scripts so they can't drift. |
+| `services.conf` | The service list (`name \| icon \| url \| bundle-id \| categories \| related \| drm \| paths`, the last three optional), shared by both build scripts so they can't drift. |
 | `select-services.sh` | Turns what the user asked for — names, menu numbers, `--all`, or nothing — into the set of services to build. Shared by both installers so they accept the same names. |
 | `build.sh` | macOS: builds/installs/signs every app in `services.conf`. Builds for the host arch (or `ARCH=universal`). On Linux it hands off to `build-linux.sh`. |
 | `build-linux.sh` | Linux: packages each service, installs under `$PREFIX`, writes `.desktop` files and the icon ladder, registers with the desktop. Also `--uninstall`. |
@@ -432,10 +432,13 @@ Two consequences worth knowing:
   would silently fail to play for its whole life. The wait is bounded (15s) — a machine that
   wakes with no network opens its windows anyway rather than showing nothing, and logs
   `[recovery] widevine not ready`.
-- **The build downloads Electron from the fork.** `ELECTRON_MIRROR` is set for you; the
-  official releases have no `+wvcus` tag and the download 404s without it. For the same
-  reason the build runs a bare `npm install` — naming `electron` explicitly would pull stock
-  Electron from the registry and quietly break DRM playback.
+- **The build downloads Electron from the fork itself.** The official releases have no
+  `+wvcus` tag, so the scripts fetch castlabs' zip once into a cache
+  (`~/Library/Caches/electron-apps` on macOS, `~/.cache/electron-apps` on Linux) and hand
+  it to the packager — nothing to configure. For an internal mirror, set `ELECTRON_ZIP_URL`
+  (full URL) or `ELECTRON_MIRROR` (base URL); `ELECTRON_ZIP_DIR` moves the cache. For the
+  same reason the build runs a bare `npm install` — naming `electron` explicitly would pull
+  stock Electron from the registry and quietly break DRM playback.
 
 Nothing else changes. If you build only the Google apps you will never notice any of this.
 
@@ -626,7 +629,8 @@ restart it.
 
 ### Add / change a service
 Nothing here is Google-specific. Any URL can be an app — append a line to **`services.conf`**
-(`name | icon | url | bundle-id | categories`), drop in an icon, and build it:
+(`name | icon | url | bundle-id | categories`, plus the optional `related | drm | paths`
+fields described at the top of that file), drop in an icon, and build it:
 
 ```bash
 # services.conf
@@ -638,8 +642,9 @@ Nothing here is Google-specific. Any URL can be an app — append a line to **`s
 ```
 
 `services.conf` is shared by both build scripts, so a service added there appears on both
-platforms. Supply `icons/<name>.icns` **or** `icons/png/<name>.png` — the Linux build
-extracts the PNG it needs from an `.icns` automatically, so you don't have to provide both.
+platforms. Supply `icons/<name>.icns` — the Linux build extracts the PNG it needs from it
+automatically, so one file covers both. A PNG alone (`icons/png/<name>.png`) works for the
+Linux build only; the macOS build uses the `.icns` and does not convert a PNG.
 
 One thing to get right: **point at the standalone page a human would use**, not an embedded
 variant meant to live in an iframe inside another product. Those render as stripped-down

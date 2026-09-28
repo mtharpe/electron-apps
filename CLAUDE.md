@@ -25,7 +25,7 @@ desktop app, is what most of `lib/` and `preload.js` are for.
 
 | File | Role |
 |---|---|
-| `services.conf` | **The app list.** `name \| icon \| url \| bundle-id \| categories`. Read by both installers. |
+| `services.conf` | **The app list.** `name \| icon \| url \| bundle-id \| categories \| related \| drm \| paths` — the last three optional. The header comment documents each field. Read by both installers. |
 | `select-services.sh` | Turns user input (names, menu numbers, `--all`) into the set to build. Shared by both installers. |
 | `build-linux.sh` | Linux: package, install under `$PREFIX`, write `.desktop` + icon ladder, resolve the icon theme. |
 | `build.sh` | macOS: package, install to `~/Applications`, ad-hoc codesign. Dispatches to `build-linux.sh` on Linux. |
@@ -100,11 +100,23 @@ Before committing a URL, load it and confirm it looks like the real app, not a w
 "Linear|linear|https://linear.app/|com.example.linearapp|Development;ProjectManagement;"
 ```
 
-Drop `icons/linear.icns` **or** `icons/png/linear.png` in place. Supplying only the `.icns`
-is fine — the Linux build extracts the largest embedded PNG itself.
+Drop `icons/linear.icns` in place. It serves both platforms: the Linux build extracts the
+largest embedded PNG itself. A bare `icons/png/linear.png` is enough **for Linux only** —
+`build.sh` passes `icons/<icon>.icns` straight to the packager and has no PNG fallback.
 
-The last field is a [freedesktop category
+The fifth field is a [freedesktop category
 list](https://specifications.freedesktop.org/menu-spec/latest/apa.html); macOS ignores it.
+Three optional fields follow, all empty for a typical app — see `services.conf`'s header:
+
+- `related` — other registrable domains the product spans, kept in-app (Messenger:
+  `messenger.com`).
+- `drm` — `1` if it plays Widevine content (Tidal). Without it the app skips the CDM wait
+  and download.
+- `paths` — a URL-path allowlist on the app's own domain, for an app that is only a tenant
+  of a bigger site (Messenger: `/messages`, the call and media pages, the auth flow).
+  Everything else on that domain opens in the real browser. A missing prefix shows up in
+  the log as `routed … to browser: https://<host>/<first-segment>/…` — that line names
+  what to add. Calls were broken this way until `/groupcall` and `/videocall` were added.
 
 ### 3. Build just that app
 
@@ -385,9 +397,16 @@ Three ways this bites if you are not expecting it:
 - **Never run `npm install electron`.** Naming the package explicitly resolves stock Electron
   from the registry and silently replaces the fork; apps still build and simply never play
   DRM. The build scripts run a bare `npm install` deliberately.
-- **`ELECTRON_MIRROR` must point at the fork.** `@electron/packager` downloads the Electron
-  dist itself and defaults to `electron/electron`, where the `+wvcus` tag does not exist —
-  the build 404s. Both build scripts export it.
+- **The build fetches the fork's zip itself; packager never downloads Electron.** Left to
+  itself, `@electron/packager` fetches through `@electron/get` from `electron/electron`,
+  where the `+wvcus` tag does not exist, and no combination of `ELECTRON_CUSTOM_*` /
+  `ELECTRON_MIRROR` settings matches castlabs' asset names (the reasoning is in both build
+  scripts). So each script `curl`s `electron-v<ver>+wvcus-<platform>-<arch>.zip` from
+  castlabs' releases into `ELECTRON_ZIP_DIR` (default `~/Library/Caches/electron-apps` or
+  `~/.cache/electron-apps`) and passes `--electron-zip-dir`. The staged name must keep the
+  `+wvcus` suffix or packager reports the zip missing. Overrides, none required:
+  `ELECTRON_ZIP_URL` (the full URL), `ELECTRON_MIRROR` (just the base URL),
+  `ELECTRON_ZIP_DIR` (the cache).
 - **Windows in a DRM app must wait for `components.whenReady()`.** A renderer created before
   the CDM is installed never gets one and fails to play for its whole life.
   `whenWidevineReady()` does this, bounded at 15s so a machine with no network still opens
