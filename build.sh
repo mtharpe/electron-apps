@@ -116,7 +116,9 @@ for entry in "${SELECTED[@]}"; do
     --out="$DIR/build" --overwrite >/dev/null
   rm -rf "$HOME/Applications/$name.app"
   cp -R "$DIR/build/$name-darwin-$ARCH/$name.app" "$HOME/Applications/"
-  xattr -dr com.apple.quarantine "$HOME/Applications/$name.app" 2>/dev/null || true
+  # By absolute path: a Homebrew or pip `xattr` earlier on PATH has no -r, fails the whole
+  # step, and prints its usage to stdout, which the 2>/dev/null does not hide.
+  /usr/bin/xattr -dr com.apple.quarantine "$HOME/Applications/$name.app" 2>/dev/null || true
   codesign --force --deep --sign - "$HOME/Applications/$name.app" >/dev/null 2>&1
   echo "    installed + signed: ~/Applications/$name.app"
 done
