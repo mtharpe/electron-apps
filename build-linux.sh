@@ -487,6 +487,10 @@ for entry in "${SELECTED[@]}"; do
   cp -R "$staged/." "$PREFIX/lib/$slug/"
   ln -sfn "$PREFIX/lib/$slug/$slug" "$PREFIX/bin/$slug"
 
+  # StartupNotify=false: Electron never completes a launch's startup sequence. On Wayland the
+  # shell hands it XDG_ACTIVATION_TOKEN and Electron ignores it (also as --xdg-activation-token),
+  # minting a token of its own for the first window instead — measured with WAYLAND_DEBUG=1.
+  # GNOME then shows a busy cursor for the whole startup timeout, or until focus moves.
   cat > "$APPS_DIR/$slug.desktop" <<EOF
 [Desktop Entry]
 Type=Application
@@ -497,7 +501,7 @@ Exec=$PREFIX/lib/$slug/$slug %U
 Icon=$slug
 Terminal=false
 Categories=$categories
-StartupNotify=true
+StartupNotify=false
 StartupWMClass=$slug
 EOF
   chmod 644 "$APPS_DIR/$slug.desktop"

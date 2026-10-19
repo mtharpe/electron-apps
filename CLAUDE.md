@@ -505,6 +505,7 @@ Scripts must stay **bash 3.2 compatible** (macOS still ships it): no associative
 | App doesn't appear in the menu | `update-desktop-database ~/.local/share/applications`; some sessions only rescan at login. |
 | All apps share one taskbar icon | `WM_CLASS` / `productName` mismatch — rebuild, don't rename files. |
 | Notification has a generic icon | `.desktop` filename must equal the slug. |
+| Busy/spinner cursor after launch (GNOME) | `StartupNotify` must be `false` — Electron never consumes the launch's `XDG_ACTIVATION_TOKEN`. GNOME Shell keeps its cached copy of a `.desktop` file when only `StartupNotify` changes, so an edit to an existing install is not seen until logout/login (or an `Exec` change). |
 | Sign-in says "browser may not be secure" | Bump `electron` in `package.json` and rebuild; the spoofed version follows automatically. |
 | "No spell check" | Check whether misspellings are *underlined* first. Underlined means the engine is fine and the complaint is really about the context menu; not underlined means the page suppressed it (`el.spellcheck === false`) or no dictionary reached `<userData>/Dictionaries/`. |
 
