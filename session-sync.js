@@ -26,7 +26,7 @@
 //   - Fail closed: if the keyring is unavailable the feature disables itself and nothing is
 //     ever written in the clear.
 
-const { session } = require('electron');
+const { app, session } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
@@ -246,10 +246,22 @@ function cookieUrl(c) {
   return (c.secure ? 'https://' : 'http://') + host + (c.path || '/');
 }
 
+// Which of those mean an account is actually signed in. The rest can exist without one:
+// accounts.google.com sets __Host-GAPS on a visitor who has not signed in yet. Counting it as
+// a session made a signed-out window look signed in, so it never adopted the real session —
+// and then published its lone GAPS cookie over the real one. Measured: Tasks published a new
+// account (25 cookies), and 7s later Gmail's fresh window for the same account replaced it
+// with a 1-cookie "session", __Host-GAPS@accounts.google.com, so single sign-on never
+// happened. Every real session in the store carries SID and __Secure-1PSID.
+const SIGNED_IN_NAMES = new Set(['SID', '__Secure-1PSID', '__Secure-3PSID']);
+
 // A stable fingerprint of the session cookies, so a process can tell whether a store already
 // reflects what it holds — the guard that stops publish/adopt from ping-ponging between
 // apps. Only the identifying session cookies count, so incidental churn does not thrash it.
+// null when the cookies are not a signed-in session — which is what keeps a signed-out jar
+// from being published, from counting as "already has a session", and from being adopted.
 function sessionHash(cookies) {
+  if (!cookies.some((c) => SIGNED_IN_NAMES.has(c.name))) return null;
   const parts = cookies
     .filter((c) => SESSION_NAMES.has(c.name))
     .map((c) => c.name + '=' + c.value)
@@ -344,6 +356,9 @@ async function readStored(email) {
   try {
     const data = JSON.parse(decrypt(key, blob));
     if (!data || data.email !== email || !Array.isArray(data.cookies)) return null;
+    // A file an older build wrote from a signed-out window (see SIGNED_IN_NAMES) is not a
+    // session; treat it as absent so the next real publish replaces it.
+    if (!sessionHash(data.cookies)) return null;
     return data;
   } catch (e) {
     log('stored session for ' + email + ' could not be decrypted — ignoring');
@@ -392,32 +407,50 @@ const attemptedHash = new Map();
 // both shapes: a plain login redirects onward to its `continue=` target, and an OAuth
 // authorize request auto-approves and redirects to its `redirect_uri` — so Gmail lands in the
 // inbox and Tidal's Google OAuth completes, with the same code and no app-specific handling.
+// Slots with an adoption in progress. One sign-in is now seen twice — the navigation's start
+// and its redirect — and attemptedHash is only set after two awaits, so without this both
+// could pass the checks and inject.
+const adopting = new Set();
+
 async function adoptForAuth(slot, wc) {
-  if (!enabled || wc.isDestroyed()) return;
-  const email = ctx.emailForSlot(slot);
-  if (!email) return;
-  const ses = session.fromPartition('persist:account-' + slot);
-  if (await hasSession(ses)) return; // already have a Google session; nothing to do
+  if (!enabled || wc.isDestroyed() || adopting.has(slot)) return;
+  adopting.add(slot);
+  try {
+    const email = ctx.emailForSlot(slot);
+    if (!email) return;
+    const ses = session.fromPartition('persist:account-' + slot);
+    if (await hasSession(ses)) return; // already have a Google session; nothing to do
 
-  const data = await readStored(email);
-  if (!data) return;
-  const hash = sessionHash(data.cookies);
-  if (attemptedHash.get(slot) === hash) return; // already tried this exact session — no loop
-  attemptedHash.set(slot, hash);
+    const data = await readStored(email);
+    if (!data) return;
+    const hash = sessionHash(data.cookies);
+    if (attemptedHash.get(slot) === hash) return; // already tried this exact session — no loop
+    attemptedHash.set(slot, hash);
 
-  const ok = await injectInto(ses, data.cookies);
-  if (ok && !wc.isDestroyed()) {
-    syncedHash.set(email, hash);
-    log('adopted session for ' + email + ' into slot ' + slot + ' (' + ok + ' cookies) at Google sign-in');
-    wc.reload();
+    const ok = await injectInto(ses, data.cookies);
+    if (ok && !wc.isDestroyed()) {
+      syncedHash.set(email, hash);
+      log('adopted session for ' + email + ' into slot ' + slot + ' (' + ok + ' cookies) at Google sign-in');
+      wc.reload();
+    }
+  } finally {
+    adopting.delete(slot);
   }
 }
 
 // Watch a slot's window: adopt when, and only when, its main frame reaches Google sign-in.
+//
+// The redirect has to be watched as well as the start. A signed-out Gmail starts its navigation
+// at mail.google.com and the SERVER redirects it to accounts.google.com within that same
+// navigation — measured: one history entry, at the sign-in URL, recorded as the original
+// load. A redirect fires did-redirect-navigation, never did-start-navigation, so watching only
+// the start meant a signed-out Gmail never adopted, with a valid session sitting in the store.
 function watchAuthNavigation(slot, wc) {
-  wc.on('did-start-navigation', (e, url, isInPlace, isMainFrame) => {
+  const check = (url, isInPlace, isMainFrame) => {
     if (isMainFrame && !isInPlace && isGoogleAuthUrl(url)) adoptForAuth(slot, wc);
-  });
+  };
+  wc.on('did-start-navigation', (e, url, isInPlace, isMainFrame) => check(url, isInPlace, isMainFrame));
+  wc.on('did-redirect-navigation', (e, url, isInPlace, isMainFrame) => check(url, isInPlace, isMainFrame));
 }
 
 // A sibling app just published (the store changed). Only windows that are themselves sitting
@@ -502,6 +535,23 @@ async function init(context) {
   }
   startWatching();
   log('ready (keyring: ' + keyBackendName + ')');
+  app.whenReady().then(publishKnownSlots).catch(() => {});
+}
+
+// Publish every account this app holds a session for, at startup, whether or not its window
+// is open. Publishing used to happen only when a slot's window loaded or its cookies changed,
+// so a session reached the other apps only while that app had the account's window open —
+// and the apps reopen only Account 1 at launch. Measured: Account 3 was signed in in Tasks
+// (SID present in its jar), but after a restart Tasks never opened that window, never
+// published, and Gmail's Account 3 sat at sign-in with nothing to adopt. Only slots with a
+// known email are touched: those are the ones that have been signed into, so this never
+// conjures a partition for an unused slot.
+async function publishKnownSlots() {
+  for (let n = 1; n <= 50; n++) {
+    if (!ctx.emailForSlot(n)) continue;
+    attachSlot(n); // and keep publishing it as Google rotates the session
+    await publish(n);
+  }
 }
 
 module.exports = { init, attachSlot, watchAuthNavigation, publish };

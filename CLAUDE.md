@@ -393,14 +393,34 @@ Design points that are load-bearing, not incidental:
   on a normal launch arrive with no `changed` event, so a signed-in app that just starts up
   would never share its session. The cookie listener still covers interactive login and
   rotation.
+- **Publish every known slot at startup, window or not** (`publishKnownSlots`). The apps
+  reopen only Account 1 at launch, so publishing only from a loaded window meant an account
+  signed in elsewhere (Account 3 in Tasks) was never shared again after a restart.
+- **"Signed in" means an `SID`-family cookie, nothing less** (`SIGNED_IN_NAMES`).
+  accounts.google.com sets `__Host-GAPS` on a visitor who has NOT signed in. Counting it
+  made a signed-out window look signed in — so it never adopted, and then published its lone
+  GAPS cookie over the real session (measured: a 25-cookie session replaced by a 1-cookie
+  one 7s later). `sessionHash` returns null without one, which gates publish, `hasSession`
+  and adoption at once; `readStored` ignores a stored file without one.
+- **Watch the redirect, not only the start.** A signed-out Gmail starts at mail.google.com
+  and the server redirects it to sign-in within the same navigation (one history entry).
+  That fires `did-redirect-navigation`, never `did-start-navigation`, so adoption never ran.
+  `adopting` stops the two events from injecting twice.
 - **Gather cookies with `get({})` then filter, never `get({domain})`.** The domain query
   misses host-only auth cookies on subdomains (accounts./mail.google.com) — measured 17 vs 43,
   and a 17-cookie graft does NOT sign you in. This one shipped as a bug in the first draft and
   was only caught by loading Gmail and checking the result, not by counting cookies.
 
-Test the round-trip without touching a real profile: run `session-sync.js`'s `adoptBeforeLoad`
-against the real store file but into a scratch `--user-data-dir`, then load the app and check
-`signedIn`. A cookie count is not enough — verify the page is actually authenticated.
+Test the round-trip without touching a real profile: launch the installed app with a scratch
+`--user-data-dir` (signed out) and a debug port. The account labels are shared, so its slots
+already know their emails and adopt from the real store at sign-in — look for `adopted
+session for …` in its output, then check the windows over CDP: titles of the form
+`Inbox - <email>`. A cookie count is not enough — verify the page is actually authenticated.
+Delete the scratch profile afterwards; it now holds copies of real sessions.
+
+Two more things that read wrong: the on-disk `Cookies` database lags the live jar by up to
+~30s (Chromium batches writes), so poll it rather than concluding from one read; and its
+cookie *names* are plaintext — read them from a copy of the file, never the values.
 
 ### DRM (why Electron is a fork here)
 
