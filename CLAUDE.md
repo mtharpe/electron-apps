@@ -48,7 +48,7 @@ desktop app, is what most of `lib/` and `preload.js` are for.
 | `icons/*.icns`, `icons/png/` | App artwork. The Linux build extracts PNG from `.icns` automatically. |
 | `docs/` | README images, generated from `icons/png/`. |
 | `styles/<slug>.css` | Optional per-app CSS, injected on that app's own host. `styles/gmail.css` is the shipped example. |
-| `scripts/<slug>.js` | Optional per-app page script, same host-only terms as the CSS, for what a stylesheet can't do. `scripts/gmail.js` makes Delete press Gmail's Delete button outside text fields (works with keyboard shortcuts off). |
+| `scripts/<slug>.js` | Optional per-app page script, same host-only terms as the CSS, for what a stylesheet can't do. `scripts/gmail.js` makes Delete press Gmail's Delete button outside text fields (works with keyboard shortcuts off); `scripts/messenger.js` posts message notifications by watching the chat list, because Facebook only notifies via web push and Electron has no push service. |
 | `icons/png/<icon>.png` | App artwork. Tidal's came from its own web app manifest, which is where to look for any site's icon. |
 | `icons/theme/<Theme>/` | Icons hand-authored to match a specific icon theme, for apps that theme has nothing for. Not installed by the build — copied in by hand, and re-copied after a theme update. |
 
@@ -265,10 +265,15 @@ platform *already* delivers shows the user two identical banners. Measured on El
 | `registration.showNotification(...)` from the page | never | mirror it |
 | `showNotification(...)` inside a service worker | never | **cannot be fixed** — worker preloads run in a separate realm |
 
+**Web push never arrives** — Electron has no push service (`pushManager.subscribe()` →
+`AbortError: Registration failed - push service not available`, measured). A site that only
+notifies by push needs a page script that watches its UI instead; Messenger is that case
+(`scripts/messenger.js`: a bold chat-list row whose preview changed, while unfocused).
+
 Clicking any of them raises the window that posted it (`focusFromNotification`), which logs
 `notification click (<source>) → slot N focused` or `NOT focused`. On GNOME Wayland only a
 real click is honoured: Electron hands libnotify's activation token to the next raise, and a
-synthetic click (CDP `dispatchEvent`) has none, so it logs `NOT focused` — that is expected,
+synthetic click (CDP `dispatchEvent`) has none, so it logs `NOT focused after 3s` — that is expected,
 not a bug. Verify with a real click on a banner. Main-process `Notification` objects must be
 held until clicked or closed (`live`); a collected one leaves its banner up but drops the click.
 

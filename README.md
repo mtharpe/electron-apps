@@ -400,6 +400,13 @@ account, named by a hash of the email.
   **Notification settings → Desktop notifications**). Calendar only fires reminders while
   a Calendar view is open — which for these apps means keeping the window open.
 - Test via **Help → Send Test Notification in 5s** (then click away).
+- Clicking a notification brings forward the window it came from — Account 2's notification
+  raises Account 2's window — and, where the page handles the click, opens the item itself.
+- **Messenger** gets its notifications from `scripts/messenger.js`, not from Facebook. Facebook
+  sends message notifications only as web push, which Electron cannot receive (no push
+  service), so the script watches the chat list and notifies when an unread conversation
+  gets a new message while the window is not focused. Clicking opens that conversation.
+  Muted conversations are not distinguished from the rest.
 
 **macOS**
 - Banners are hidden while the posting app is **frontmost** — alerts show while you're in
@@ -470,7 +477,7 @@ resists being embedded, something it will actually sign you into.
 | `session-sync.js` | **Single sign-on**: shares an established session between the apps, encrypted, keyed by email. |
 | `preload.js` | Runs in the page's main world; the **stealth layer** + the client-side **notification mirror**. |
 | `accounts.html` / `accounts-preload.js` | The **Configure Accounts…** window and its context-isolated bridge (load / save / close, nothing else). |
-| `styles/<slug>.css`, `scripts/<slug>.js` | Optional per-app stylesheet and page script, e.g. `styles/gmail.css`, `scripts/gmail.js`. |
+| `styles/<slug>.css`, `scripts/<slug>.js` | Optional per-app stylesheet and page script, e.g. `styles/gmail.css`, `scripts/gmail.js`, `scripts/messenger.js`. |
 | `services.conf` | The service list (`name \| icon \| url \| bundle-id \| categories \| related \| drm \| paths \| handlers`, the last four optional), shared by both build scripts so they can't drift. |
 | `select-services.sh` | Turns what the user asked for — names, menu numbers, `--all`, or nothing — into the set of services to build. Shared by both installers so they accept the same names. |
 | `prereqs.sh` | Checks the build's prerequisites and offers to install what's missing. Shared by both installers. |
@@ -564,6 +571,11 @@ own calls — verified, the worker still sees the original `showNotification`.
 In practice **Google Calendar reminders are unaffected**: Calendar only fires reminders
 while a Calendar view is open, and posts them from the page, which the first two rows
 cover. The gap only bites a notification pushed to a worker with no page driving it.
+
+**Web push never arrives.** Electron has no push service: `pushManager.subscribe()` rejects with
+*"Registration failed - push service not available"*. A site that notifies only through push
+(Facebook/Messenger) shows nothing, whatever its settings say. The workaround is a per-app
+script that watches the page itself — `scripts/messenger.js`.
 
 On macOS the mirror keeps its original, field-tested behaviour (page-level notifications
 are mirrored); none of the Linux tuning changes it.
