@@ -417,7 +417,7 @@ ICON_THEME="${ICON_THEME:-$(icon_theme_name)}"
 echo "==> Icon theme: $ICON_THEME"
 
 for entry in "${SELECTED[@]}"; do
-  IFS='|' read -r name icon url bid categories related drm paths <<< "$entry"
+  IFS='|' read -r name icon url bid categories related drm paths handlers <<< "$entry"
   slug="$(slugify "$name")"
   echo "==> Building $name"
 
@@ -432,8 +432,8 @@ for entry in "${SELECTED[@]}"; do
   # drm is a plain boolean the runtime reads to decide whether to wait on Widevine.
   # paths is a comma/space-separated URL-path allowlist for services tenanted inside a
   # larger site (see services.conf); empty for the common case where the app owns its
-  # whole domain.
-  python3 -c "import json,sys; json.dump({'name':sys.argv[1],'url':sys.argv[2],'slug':sys.argv[3],'related':sys.argv[4],'drm':sys.argv[5]=='1','paths':sys.argv[6]}, open('app-config.json','w'))" "$name" "$url" "$slug" "${related:-}" "${drm:-}" "${paths:-}"
+  # whole domain. handlers maps link schemes this app takes over (mailto: for Gmail).
+  python3 -c "import json,sys; json.dump({'name':sys.argv[1],'url':sys.argv[2],'slug':sys.argv[3],'related':sys.argv[4],'drm':sys.argv[5]=='1','paths':sys.argv[6],'handlers':sys.argv[7]}, open('app-config.json','w'))" "$name" "$url" "$slug" "${related:-}" "${drm:-}" "${paths:-}" "${handlers:-}"
   # Becomes this app's WM_CLASS (see above); StartupWMClass in the .desktop file matches it.
   set_product_name "$slug"
 
@@ -504,6 +504,11 @@ Categories=$categories
 StartupNotify=false
 StartupWMClass=$slug
 EOF
+  # Declaring a scheme makes the app a CANDIDATE handler; it does not make it the default.
+  # That stays the user's choice: gio mime x-scheme-handler/mailto gmail.desktop
+  mimes="$(printf '%s' "${handlers:-}" | tr ',' '\n' \
+    | sed -n 's/^[[:space:]]*\([A-Za-z][A-Za-z0-9+.-]*\)[[:space:]]*=.*/x-scheme-handler\/\1;/p' | tr -d '\n')"
+  [ -n "$mimes" ] && echo "MimeType=$mimes" >> "$APPS_DIR/$slug.desktop"
   chmod 644 "$APPS_DIR/$slug.desktop"
   echo "    installed: $PREFIX/lib/$slug  (launch: $slug)"
 done

@@ -30,6 +30,7 @@ const {
 } = require('./lib/accounts');
 const accountsModule = require('./lib/accounts');
 const { attachExternalLinkRouting, isFirstPartyHost } = require('./lib/routing');
+const handlers = require('./lib/handlers');
 const { nativeNotification } = require('./lib/notifications');
 const { attachLoadRecovery, recoverAfterResume } = require('./lib/recovery');
 const {
@@ -120,6 +121,37 @@ function openAccountWindow(n) {
   });
   return win;
 }
+
+// A handled link (mailto: in Gmail) gets a window of its own, sized like Gmail's pop-out
+// compose. Loaded into the account window instead, Gmail's compose view filled the whole
+// maximized window and replaced whatever the user had open there. Same session as slot n, so
+// it sends as that account; not registered as a slot window, since it is not one.
+function openHandledWindow(n, url) {
+  const partition = 'persist:account-' + n;
+  const sess = session.fromPartition(partition);
+  spoofSession(sess, isFirstPartyHost);
+  sess.__partition = partition;
+  // Parented so the account window can't cover it: on a cold start the maximized account
+  // window may reveal after this one does.
+  const owner = windows.get(n);
+  const win = new BrowserWindow(Object.assign({
+    width: 760,
+    height: 700,
+    show: false,
+    title: APP_NAME,
+    backgroundColor: windowBackground(),
+    webPreferences: Object.assign({ partition }, STEALTH_WEBPREFS),
+  }, APP_ICON ? { icon: APP_ICON } : {},
+  owner && !owner.isDestroyed() ? { parent: owner } : {}));
+  win.webContents.setUserAgent(CHROME_UA);
+  const reveal = () => { if (!win.isDestroyed() && !win.isVisible()) win.show(); };
+  const revealTimer = setTimeout(reveal, REVEAL_DEADLINE_MS);
+  win.once('ready-to-show', reveal);
+  win.on('closed', () => clearTimeout(revealTimer));
+  win.loadURL(url, { userAgent: CHROME_UA });
+  return win;
+}
+handlers.setOpener(openHandledWindow);
 
 // ACCOUNT_SLOTS is the bound, not an arbitrary ceiling: this used to scan to 50, which meant
 // "New Account Window" past the sixth built a slot nothing else in the app could reach. The
@@ -253,7 +285,10 @@ const gotSingleInstanceLock = app.requestSingleInstanceLock();
 if (!gotSingleInstanceLock) {
   app.quit();
 } else {
-  app.on('second-instance', () => {
+  app.on('second-instance', (event, argv) => {
+    // A handled link (mailto: in Gmail) goes to account 1, the account the app opens on.
+    const target = handlers.handledUrlFromArgv(argv);
+    if (target) { openHandledWindow(1, target); return; }
     const open = BrowserWindow.getAllWindows().filter((w) => !w.isDestroyed());
     if (open.length === 0) { openAccountWindow(nextFreeSlot()); return; }
     const win = open[0];
@@ -275,6 +310,8 @@ if (!gotSingleInstanceLock) {
 
     buildMenu();
     openAccountWindow(1);
+    const launchTarget = handlers.handledUrlFromArgv(process.argv);
+    if (launchTarget) openHandledWindow(1, launchTarget);
 
     // On the very first launch, fire one native notification so the OS registers this app
     // with its notification settings (macOS only lists apps under System Settings →

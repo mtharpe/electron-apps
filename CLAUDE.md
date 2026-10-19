@@ -25,7 +25,7 @@ desktop app, is what most of `lib/` and `preload.js` are for.
 
 | File | Role |
 |---|---|
-| `services.conf` | **The app list.** `name \| icon \| url \| bundle-id \| categories \| related \| drm \| paths` — the last three optional. The header comment documents each field. Read by both installers. |
+| `services.conf` | **The app list.** `name \| icon \| url \| bundle-id \| categories \| related \| drm \| paths \| handlers` — the last four optional. The header comment documents each field. Read by both installers. |
 | `select-services.sh` | Turns user input (names, menu numbers, `--all`) into the set to build. Shared by both installers. |
 | `build-linux.sh` | Linux: package, install under `$PREFIX`, write `.desktop` + icon ladder, resolve the icon theme. |
 | `build.sh` | macOS: package, install to `~/Applications`, ad-hoc codesign. Dispatches to `build-linux.sh` on Linux. |
@@ -106,7 +106,7 @@ largest embedded PNG itself. A bare `icons/png/linear.png` is enough **for Linux
 
 The fifth field is a [freedesktop category
 list](https://specifications.freedesktop.org/menu-spec/latest/apa.html); macOS ignores it.
-Three optional fields follow, all empty for a typical app — see `services.conf`'s header:
+Four optional fields follow, all empty for a typical app — see `services.conf`'s header:
 
 - `related` — other registrable domains the product spans, kept in-app (Messenger:
   `messenger.com`).
@@ -117,6 +117,10 @@ Three optional fields follow, all empty for a typical app — see `services.conf
   Everything else on that domain opens in the real browser. A missing prefix shows up in
   the log as `routed … to browser: https://<host>/<first-segment>/…` — that line names
   what to add. Calls were broken this way until `/groupcall` and `/videocall` were added.
+- `handlers` — link schemes the app takes over, as `scheme=https-template` with `%s` for the
+  encoded link (Gmail: `mailto=https://mail.google.com/mail/?extsrc=mailto&url=%s`). Linux
+  declares it in the `.desktop` file; the user still picks the default
+  (`gio mime x-scheme-handler/mailto gmail.desktop`).
 
 ### 3. Build just that app
 
