@@ -27,6 +27,7 @@ desktop app, is what most of `lib/` and `preload.js` are for.
 |---|---|
 | `services.conf` | **The app list.** `name \| icon \| url \| bundle-id \| categories \| related \| drm \| paths \| handlers` — the last four optional. The header comment documents each field. Read by both installers. |
 | `select-services.sh` | Turns user input (names, menu numbers, `--all`) into the set to build. Shared by both installers. |
+| `prereqs.sh` | `ensure_prereqs`: checks node/npm/curl/python3 (required) and rsvg-convert + a keyring client (optional), and offers to install what is missing via the system package manager — asks first; `INSTALL_PREREQS=1`/`0` to decide in scripts. Image-based hosts get the command instead. Shared by both installers. |
 | `build-linux.sh` | Linux: package, install under `$PREFIX`, write `.desktop` + icon ladder, resolve the icon theme. |
 | `build.sh` | macOS: package, install to `~/Applications`, ad-hoc codesign. Dispatches to `build-linux.sh` on Linux. |
 | `main.js` | Entry point only: creates the windows, wires the modules together, owns the app lifecycle. ~320 lines. |

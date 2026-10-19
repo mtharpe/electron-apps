@@ -13,7 +13,8 @@
 #         ARCH=arm64 ./build-linux.sh
 #         ICON_THEME=Papirus-Dark ./build-linux.sh   # default: whatever this machine uses
 #
-# Requires: node + npm. ImageMagick or python3-Pillow is used to build the icon-size
+# Requires: node + npm, curl, python3 — checked first, and offered for install if missing
+# (prereqs.sh). ImageMagick or python3-Pillow is used to build the icon-size
 # ladder; without either, a single full-size icon is installed instead.
 #
 # Installs, per service, entirely inside $PREFIX (no root, nothing outside your home):
@@ -38,6 +39,8 @@ esac
 # Provides slugify(), list_services() and resolve_services() — shared with build.sh so the
 # two installers can't disagree about what an app is called.
 . "$DIR/select-services.sh"
+# ensure_prereqs(): what the build and the apps need, offered for install if missing.
+. "$DIR/prereqs.sh"
 
 APPS_DIR="$PREFIX/share/applications"
 ICONS_DIR="$PREFIX/share/icons/hicolor"
@@ -92,6 +95,10 @@ if [ "$UNINSTALL" = 1 ]; then
 fi
 
 resolve_services ${WANTED[@]+"${WANTED[@]}"}
+
+# Before anything that needs node, curl or python3 — and after the --list/--uninstall exits,
+# which must keep working on a machine that has none of them.
+ensure_prereqs
 
 # Icons ship as macOS .icns (the original format of this project). Extract the largest
 # embedded PNG once into icons/png/ so adding a service still only means adding an .icns.

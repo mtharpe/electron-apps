@@ -9,7 +9,8 @@
 #         ./build.sh --list          # show what's available
 #
 # Installs to ~/Applications and ad-hoc signs each app.
-# Requires: node + npm (brew install node)
+# Requires: node + npm, curl, python3 — checked first, and offered for install through
+# Homebrew if missing (prereqs.sh).
 set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$DIR"
@@ -27,8 +28,10 @@ ARCH="${ARCH:-$([ "$(uname -m)" = "x86_64" ] && echo x64 || echo arm64)}"
 . "$DIR/services.conf"
 # Shared with build-linux.sh so both installers agree on what an app can be called.
 . "$DIR/select-services.sh"
+# ensure_prereqs(): what the build and the apps need, offered for install if missing.
+. "$DIR/prereqs.sh"
 
-usage() { sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; }
 
 WANTED=()
 while [ "$#" -gt 0 ]; do
@@ -42,6 +45,10 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 resolve_services ${WANTED[@]+"${WANTED[@]}"}
+
+# Before anything that needs node, curl or python3 — and after the --list/--uninstall exits,
+# which must keep working on a machine that has none of them.
+ensure_prereqs
 
 # Install build deps on first run (electron + packager are devDependencies).
 if [ ! -d node_modules ]; then
