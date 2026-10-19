@@ -20,9 +20,9 @@
 //     accidentally signed into the wrong account cannot log a matching slot elsewhere out
 //     of the right one — an adopt only ever applies a session for the email it belongs to.
 //   - Encrypted at rest with AES-256-GCM. The key is 32 random bytes kept in the OS keyring
-//     (libsecret via secret-tool on Linux), NOT in a file next to the ciphertext, and NOT
-//     via Electron safeStorage, whose key is scoped per app name and so cannot be shared
-//     across these separate apps (measured).
+//     (libsecret on Linux, via secret-tool or its Python bindings; KWallet; macOS Keychain),
+//     NOT in a file next to the ciphertext, and NOT via Electron safeStorage, whose key is
+//     scoped per app name and so cannot be shared across these separate apps (measured).
 //   - Fail closed: if the keyring is unavailable the feature disables itself and nothing is
 //     ever written in the clear.
 
@@ -61,6 +61,27 @@ function runTool(cmd, args, input) {
   });
 }
 
+// secret-tool's lookup/store, in Python over libsecret's GObject bindings. Exit 1 on "no such
+// item", like secret-tool; a missing gi or typelib fails the same way, and getKey's round-trip
+// then passes this backend over. The secret goes in on stdin, never argv, so it is not in `ps`.
+const LIBSECRET_PY = [
+  'import sys',
+  'import gi',
+  "gi.require_version('Secret', '1')",
+  'from gi.repository import Secret',
+  'mode, label, rest = sys.argv[1], sys.argv[2], sys.argv[3:]',
+  'attrs = dict(zip(rest[0::2], rest[1::2]))',
+  "schema = Secret.Schema.new('org.freedesktop.Secret.Generic', Secret.SchemaFlags.DONT_MATCH_NAME,",
+  '                           {k: Secret.SchemaAttributeType.STRING for k in attrs})',
+  "if mode == 'lookup':",
+  '    value = Secret.password_lookup_sync(schema, attrs, None)',
+  '    if value is None:',
+  '        sys.exit(1)',
+  '    sys.stdout.write(value)',
+  'elif not Secret.password_store_sync(schema, attrs, Secret.COLLECTION_DEFAULT, label, sys.stdin.read(), None):',
+  '    sys.exit(1)',
+].join('\n');
+
 // The keyring backends we know how to talk to, in preference order. Each is just a lookup
 // and a store over a CLI that ships with its platform; we never assume one is present or
 // working — init() proves it with a real round-trip before enabling anything.
@@ -69,6 +90,16 @@ const KEYRING_BACKENDS = [
     name: 'libsecret',
     lookup: () => runTool('secret-tool', ['lookup', ...KEY_ATTRS]),
     store: (b64) => runTool('secret-tool', ['store', '--label=' + KEY_LABEL, ...KEY_ATTRS], b64),
+  },
+  {
+    // The same libsecret, reached through its Python bindings rather than secret-tool. An
+    // immutable host can have the keyring daemon and the library but not the CLI: measured on
+    // Vanilla OS (GNOME), gnome-keyring was running and python3 could load gi's Secret, but
+    // secret-tool was absent — so single sign-on was off on a machine fully able to do it.
+    // Same attributes, and DONT_MATCH_NAME so either path finds the item the other wrote.
+    name: 'libsecret-python',
+    lookup: () => runTool('python3', ['-I', '-c', LIBSECRET_PY, 'lookup', KEY_LABEL, ...KEY_ATTRS]),
+    store: (b64) => runTool('python3', ['-I', '-c', LIBSECRET_PY, 'store', KEY_LABEL, ...KEY_ATTRS], b64),
   },
   {
     name: 'kwallet',

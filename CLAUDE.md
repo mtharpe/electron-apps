@@ -366,13 +366,18 @@ Design points that are load-bearing, not incidental:
   that slot is meant to be.
 - **Encrypted with a key in the OS keyring**, not Electron `safeStorage` — safeStorage's key
   is scoped per app name, so one app cannot decrypt another's blob (measured). The keyring is
-  chosen by capability, not platform: `getKey()` tries libsecret (`secret-tool`), KDE Wallet
-  (`kwallet-query`), and macOS Keychain (`security`) in order, and enables the feature only
+  chosen by capability, not platform: `getKey()` tries libsecret (`secret-tool`), libsecret
+  through python3's `gi` bindings, KDE Wallet (`kwallet-query`), and macOS Keychain
+  (`security`) in order, and enables the feature only
   for a backend that survives a real store→lookup→compare round-trip. A backend whose binary
   is absent, whose store is locked, or that silently drops the write fails that check and is
   passed over; if none passes, the feature is off. This is the answer to "we can't know the
   capabilities on someone else's machine" — it finds out by using it, never by assuming.
-  Only libsecret is verified on real hardware here; kwallet and keychain are written to spec
+  The python path exists because an image-based host can have the keyring and the library
+  but not the CLI: Vanilla OS had gnome-keyring running and `gi` Secret loadable, no
+  `secret-tool` — so SSO had silently been off there all along. Both libsecret paths use
+  the same attributes and read each other's item.
+  Only libsecret is verified on real hardware here (the python path on Vanilla OS); kwallet and keychain are written to spec
   and made safe by the round-trip, which never reports success it didn't observe (macOS note:
   the `security -w` key is briefly visible in `ps` — a stdin path would be better once someone
   can verify it on real macOS).
