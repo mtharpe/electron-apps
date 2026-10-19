@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/apps.png" alt="Gmail, Google Calendar, Google Tasks, Google Keep, Google Messages, Tidal, Messenger" width="760">
+<img src="docs/apps.png" alt="Gmail, Google Calendar, Google Tasks, Google Keep, Google Messages, Tidal, Apple Music, Messenger" width="864">
 
 # Electron Apps
 
@@ -30,9 +30,9 @@ Ships with a set of apps ready to go; **[adding your own is one line](#add--chan
 These ship configured out of the box. They are a starting set, not the point — anything
 with a URL can be an app here.
 
-Tidal is the one that earns the Electron fork: it has no official Linux client, and its
-audio is **Widevine-protected**, which stock Electron cannot play at all. See
-[DRM / protected content](#drm--protected-content).
+Tidal and Apple Music are the ones that earn the Electron fork: neither has an official
+Linux client, and both are **Widevine-protected**, which stock Electron cannot play at all.
+See [DRM / protected content](#drm--protected-content).
 
 |  | App | Opens | Install name |
 |:--:|---|---|---|
@@ -42,6 +42,7 @@ audio is **Widevine-protected**, which stock Electron cannot play at all. See
 | <img src="docs/icons/google-keep.png" width="40"> | **Google Keep** | `keep.google.com` | `google-keep` |
 | <img src="docs/icons/google-messages.png" width="40"> | **Google Messages** | `messages.google.com` | `google-messages` |
 | <img src="docs/icons/tidal.png" width="40"> | **Tidal** | `listen.tidal.com` | `tidal` |
+| <img src="docs/icons/apple-music.png" width="40"> | **Apple Music** | `music.apple.com` | `apple-music` |
 | <img src="docs/icons/messenger.png" width="40"> | **Messenger** | `facebook.com/messages` | `messenger` |
 
 Install all of them, **[just the ones you want](#choosing-which-apps-to-install)**, or none
@@ -80,13 +81,25 @@ cd electron-apps
 ./build.sh          # macOS; on Linux this dispatches to ./build-linux.sh
 ```
 
-It asks which apps you want, builds them, and installs them. That's the whole setup —
-there is nothing to configure first and no runtime dependency beyond Node for the build.
+It checks its prerequisites, asks which apps you want, builds them, and installs them.
+That's the whole setup — there is nothing to configure first.
 
-> **Requirements**
-> **macOS** — Node.js + npm (`brew install node`), Xcode command line tools (for `codesign`).
-> **Linux** — Node.js + npm, a notification daemon (GNOME, KDE, …) and `libnotify`.
-> Optional: ImageMagick **or** python3-Pillow to render the icon-size ladder.
+> **Requirements** — checked before every build, and offered for install if missing
+> **Both** — Node.js **22.12+** and npm, `curl`, `python3`.
+> **macOS** — Xcode command line tools (for `codesign`; not checked — `xcode-select --install`).
+> Missing tools above are offered through Homebrew.
+> **Linux** — a notification daemon (GNOME, KDE, …) and `libnotify`; missing tools are offered
+> through `apt`, `dnf`, `zypper` or `pacman`.
+> Optional: `rsvg-convert` (themed SVG icons), a keyring client for
+> [single sign-on](#single-sign-on-across-the-apps), and ImageMagick **or** python3-Pillow for
+> the icon-size ladder.
+>
+> The installer **asks before installing anything** and never uses `sudo` silently.
+> `INSTALL_PREREQS=1` says yes up front (for scripts), `INSTALL_PREREQS=0` never installs.
+> On an image-based distro (Silverblue, Vanilla OS, …) it prints the exact
+> `rpm-ostree` / `abroot` command instead, since layering a package there needs a reboot.
+> Node itself is never offered: distro packages usually lag behind what the build needs, so
+> get a current one from [nodejs.org](https://nodejs.org) or nvm.
 
 ---
 
@@ -159,6 +172,24 @@ recover on their own from a failed load or a wake-from-sleep with no network yet
 
 </td>
 </tr>
+<tr>
+<td valign="top">
+
+**Gmail behaves like a mail client**
+**Delete** deletes the highlighted conversation — in every account, whatever Gmail's own
+keyboard-shortcut setting — and Gmail can be your desktop's `mailto:` handler, composing in a
+window of its own. See [Gmail extras](#gmail-extras).
+
+</td>
+<td valign="top">
+
+**Sets itself up**
+The installer checks for what it needs and offers to install anything missing through your
+system's package manager — asking first. Links still reach your browser on image-based
+distros where it is a Flatpak and there is no `xdg-open`.
+
+</td>
+</tr>
 </table>
 
 ---
@@ -178,6 +209,9 @@ Which apps do you want to install?
     3) Google Tasks
     4) Google Keep
     5) Google Messages
+    6) Tidal
+    7) Apple Music
+    8) Messenger
 
 Numbers ("1 3"), names ("gmail keep"), or press Enter for all:
 ```
@@ -223,8 +257,8 @@ right-click → **Options → Keep in Dock**.
 | `~/.local/share/applications/<slug>.desktop` | app-menu entry |
 | `~/.local/share/icons/hicolor/*/apps/<slug>.png` | icons, 16px→512px |
 
-Launch from your desktop's app menu, or run `gmail` / `google-calendar` /
-`google-tasks` / `google-keep` / `google-messages` from a shell.
+Launch from your desktop's app menu, or run any app by its install name (`gmail`,
+`google-calendar`, `apple-music`, … — see [Included apps](#included-apps)) from a shell.
 
 ```bash
 ./build-linux.sh                   # pick from the menu (see above)
@@ -320,7 +354,9 @@ pick that up.
 - **⌘N** (or **Accounts → New Account Window**, or `⌘1`–`⌘6`) opens a new window with a
   **fully isolated session** — sign a different Google account into each. Logins persist
   per slot across restarts.
-- Each app keeps its own session store, so you sign in per app.
+- Each app keeps its own session store, but you still sign each account in only once —
+  [single sign-on](#single-sign-on-across-the-apps) shares an established login between the
+  apps.
 
 ### Single sign-on across the apps
 The apps keep isolated sessions on purpose — that's what lets each window be a different
@@ -339,11 +375,16 @@ What is and isn't shared:
   wrong account can't log a matching slot elsewhere out of the right one — an app only ever
   adopts a session for the identity that slot is meant to be.
 - **Encrypted at rest** (AES-256-GCM) under a key kept in your OS keyring, never in a file.
-  It doesn't assume a particular keyring: it tries the ones it knows (libsecret / GNOME
-  Keyring, KDE Wallet, macOS Keychain) and confirms one actually works with a real
-  store-and-read-back before trusting it. If none works on your machine the feature disables
-  itself and nothing is ever written unencrypted — each app just signs in on its own, and the
-  startup log says which keyring it used or why it's off.
+  It doesn't assume a particular keyring: it tries the ones it knows — libsecret / GNOME
+  Keyring (through `secret-tool`, or through python3's libsecret bindings where the
+  `secret-tool` command isn't installed, as on Vanilla OS), KDE Wallet, macOS Keychain — and
+  confirms one actually works with a real store-and-read-back before trusting it. If none
+  works on your machine the feature disables itself and nothing is ever written unencrypted —
+  each app just signs in on its own. The startup log says which keyring it used or why it's
+  off: `journalctl --user | grep session-sync` on Linux.
+- **One key for all the apps**, even when they all start at once on a machine that has none
+  yet: creating the key is serialised, so the apps never end up each encrypting with a key
+  only they hold.
 
 This does **not** create sessions, bypass 2FA, or read anything outside these apps. It moves
 an already-authenticated session between your own apps on your own machine. It also can't
@@ -385,6 +426,26 @@ account, named by a hash of the email.
 | `⌘/Ctrl + +` / `-` / `0` | Zoom in / out / reset |
 | `⌥⌘I` / `Ctrl+Shift+I` | Toggle DevTools |
 
+### Gmail extras
+
+**Delete deletes.** Press **Delete** and the conversation you have open, or the ones you
+have checked, go to the Trash, like in a desktop mail client. It presses Gmail's own Delete
+button, so it works in every account regardless of Gmail's per-account **Keyboard
+shortcuts** setting; with shortcuts on, it also deletes the conversation under the `j`/`k`
+cursor. Anywhere you can type — the search box, a reply, a compose window — Delete edits
+text exactly as before.
+
+**Gmail as your mail app.** Gmail registers itself (Linux) as a handler for `mailto:` links.
+Make it the default and every email link on your desktop opens a compose window in the app:
+
+```bash
+gio mime x-scheme-handler/mailto gmail.desktop
+```
+
+A link from the desktop — or from any of the other apps — composes as **Account 1**; a
+`mailto:` link clicked inside Gmail stays in the account it came from. macOS doesn't
+register the handler yet.
+
 ---
 
 ## How it works
@@ -396,23 +457,36 @@ resists being embedded, something it will actually sign you into.
 
 | File | Role |
 |---|---|
-| `main.js` | Main process: per-account isolated windows, menus, request-header spoofing, permission grants, the **notification mirror** IPC handler, **external-link routing** (every window), **enterprise-SSO routing**, **per-account window titles**, the **Gmail view normalizer**, maximize-on-start, single-instance lock. Platform differences (UA, menus, link opening, icons) branch on `IS_MAC`. |
+| `main.js` | Entry point: creates the per-account windows, wires the modules below together, owns the app lifecycle and the single-instance lock. |
+| `lib/chromium.js` | Chrome User-Agent + matching `Sec-CH-UA` headers, permission grants, the sandboxed renderer preferences, the Widevine wait. |
+| `lib/routing.js` | Whether a URL loads in-app or opens in your browser, and how it gets there: **external-link routing** (every window), **enterprise-SSO routing**, **Chrome profile routing**, Flatpak browsers. |
+| `lib/accounts.js` | Account slots: names, Chrome profile mappings, the shared `accounts.json`. |
+| `lib/handlers.js` | Link schemes an app takes over (`mailto:` for Gmail), from `services.conf`. |
+| `lib/notifications.js` | Native banners and the **notification mirror** IPC handler. |
+| `lib/recovery.js` | Retry after a failed load; reload after wake-from-sleep. |
+| `lib/page-tweaks.js` | Per-page adjustments: **per-app CSS and scripts**, **per-account window titles**, the right-click / spell-check menu. |
+| `lib/theme.js`, `lib/menu.js` | Light/dark following the desktop; the application menu. |
+| `lib/config.js`, `lib/util.js`, `lib/window-registry.js` | This app's identity (from `app-config.json`), shared helpers, the slot → window map. |
+| `session-sync.js` | **Single sign-on**: shares an established session between the apps, encrypted, keyed by email. |
 | `preload.js` | Runs in the page's main world; the **stealth layer** + the client-side **notification mirror**. |
-| `accounts.html` | The **Configure Accounts…** window: a name field and a Chrome profile dropdown per account slot. |
-| `accounts-preload.js` | Context-isolated bridge for that window — exposes load / save / close and nothing else. |
-| `services.conf` | The service list (`name \| icon \| url \| bundle-id \| categories \| related \| drm \| paths`, the last three optional), shared by both build scripts so they can't drift. |
+| `accounts.html` / `accounts-preload.js` | The **Configure Accounts…** window and its context-isolated bridge (load / save / close, nothing else). |
+| `styles/<slug>.css`, `scripts/<slug>.js` | Optional per-app stylesheet and page script, e.g. `styles/gmail.css`, `scripts/gmail.js`. |
+| `services.conf` | The service list (`name \| icon \| url \| bundle-id \| categories \| related \| drm \| paths \| handlers`, the last four optional), shared by both build scripts so they can't drift. |
 | `select-services.sh` | Turns what the user asked for — names, menu numbers, `--all`, or nothing — into the set of services to build. Shared by both installers so they accept the same names. |
+| `prereqs.sh` | Checks the build's prerequisites and offers to install what's missing. Shared by both installers. |
 | `build.sh` | macOS: builds/installs/signs every app in `services.conf`. Builds for the host arch (or `ARCH=universal`). On Linux it hands off to `build-linux.sh`. |
 | `build-linux.sh` | Linux: packages each service, installs under `$PREFIX`, writes `.desktop` files and the icon ladder, registers with the desktop. Also `--uninstall`. |
 | `icons/` | 1024px `.icns` app icons (macOS). |
 | `icons/png/` | PNGs extracted from those `.icns` files, used by the Linux build. Regenerated automatically if missing. |
-| `docs/` | Images used by this README (the icon strip and the per-app icons), generated from `icons/png/`. |
+| `icons/theme/<Theme>/` | Icons drawn to match a specific icon theme, for apps it has nothing for. Copied in by hand. |
+| `docs/` | Images used by this README (the icon strip and the per-app icons), made from `icons/png/`. |
 
 ### DRM / protected content
 
-Some services will not play in a stock Electron at all. Tidal is the example here: its audio
-is Widevine-protected, and stock Electron ships no Content Decryption Module, so playback is
-impossible rather than merely degraded. Measured in stock Electron:
+Some services will not play in a stock Electron at all. Tidal and Apple Music are the
+examples here (both set `drm` in `services.conf`): their audio is Widevine-protected, and
+stock Electron ships no Content Decryption Module, so playback is impossible rather than
+merely degraded. Measured in stock Electron:
 
 ```
 com.widevine.alpha        NotSupportedError: Unsupported keySystem
@@ -520,10 +594,20 @@ a dead in-app window instead of the browser.) Allowed in-app child windows inher
 per-account session, so they stay in the right cookie jar.
 
 macOS finds Chrome by bundle name (`open -a "Google Chrome"`). Linux has no such lookup, so
-the app probes `PATH` once at startup for `google-chrome`, `chromium`, `brave-browser` and
-friends, and falls back to `xdg-open` (your actual default browser) if none are found. Set
+the app probes once at startup for `google-chrome`, `chromium`, `brave-browser` and friends
+— on `PATH`, and as **Flatpaks** (`com.google.Chrome`, `org.chromium.Chromium`, …) in the
+Flatpak export directories, which a desktop-launched app doesn't have on its `PATH`. If none
+is found it falls back to your default browser through `xdg-open`, or `gio open` where there
+is no `xdg-open` (image-based distros such as Vanilla OS ship without it). Set
 **`ELECTRON_APPS_BROWSER`** to a command or absolute path to override the probe on either
 platform.
+
+**Sign-in links stay in the window.** A signed-out window doesn't always land on a sign-in
+page: Calendar in a fresh account slot lands on Google's Calendar marketing page, whose
+**Sign in** button opens in a new tab. The app keeps any such link — one clicked on a page
+outside the app that leads back into it — in the same window, so you don't end up with a
+second window holding the signed-in app and the first stuck on the landing page. Popups that
+a page opens itself (how SSO providers report back) are left as popups.
 
 > **Renamed.** `ELECTRON_APPS_BROWSER` and `ELECTRON_APPS_AUTH_DOMAINS` were
 > `GOOGLE_APP_BROWSER` and `GOOGLE_APP_AUTH_DOMAINS` until this project stopped being a
@@ -623,14 +707,23 @@ To restyle any app without touching this repo, drop a `custom.css` in its config
 (`~/.config/<App Name>/` on Linux, `~/Library/Application Support/<App Name>/` on macOS) and
 restart it.
 
+### Per-app scripts
+For what a stylesheet can't do, `scripts/<slug>.js` runs in the page on the same terms —
+the app's own host only, every window, once per page load. There is no user-supplied
+counterpart: unlike CSS, a script runs with the full reach of your signed-in session, so
+only scripts shipped in this repo are loaded.
+
+The shipped example is `scripts/gmail.js`, which makes **Delete** delete — see
+[Gmail extras](#gmail-extras).
+
 ---
 
 ## Configuration
 
 ### Add / change a service
 Nothing here is Google-specific. Any URL can be an app — append a line to **`services.conf`**
-(`name | icon | url | bundle-id | categories`, plus the optional `related | drm | paths`
-fields described at the top of that file), drop in an icon, and build it:
+(`name | icon | url | bundle-id | categories`, plus the optional `related | drm | paths |
+handlers` fields described at the top of that file), drop in an icon, and build it:
 
 ```bash
 # services.conf
@@ -694,14 +787,17 @@ are correctly treated as external.
 |---|---|
 | "This browser or app may not be secure" at sign-in | The stealth layer should handle it; if it regresses, bump the Chrome version (above). |
 | Calendar: "Could not load the data" on a **Workspace** calendar | Fixed by the sandboxed renderer (secondary multi-login accounts no longer fail). If it ever recurs: `⌘R` to reload (windows also auto-reload on wake); if it happens on *first* load for everyone, the bundled Chromium may be too old — bump `electron` in `package.json` and rebuild. |
-| Gmail still shows the Mail/Chat/Meet left rail | Make sure you relaunched the rebuilt app (⌘Q first). The hider keys off the buttons' `aria-label`s; if a Gmail redesign changes them it'll quietly stop matching — open an issue / update the selector in `main.js` (`GMAIL_RAIL_HIDE_CSS`). |
+| Gmail still shows the Mail/Chat/Meet left rail | Make sure you relaunched the rebuilt app (⌘Q first). The hider keys off the buttons' `aria-label`s; if a Gmail redesign changes them it'll quietly stop matching — open an issue / update the selectors in `styles/gmail.css`. |
+| Gmail: **Delete** does nothing | Relaunch the rebuilt app. Delete acts on the conversation that is open or checked; with nothing open or checked there is nothing to delete unless Gmail's keyboard shortcuts are on (then it takes the `j`/`k` cursor's conversation). It deliberately does nothing while you're typing in a field. |
+| Signed into an account in one app, but another app still asks | Single sign-on needs a working keyring. On Linux, `journalctl --user \| grep session-sync`: `ready (keyring: …)` means it's on; `no working keyring backend` means install `secret-tool` (the installer offers it) or python3's libsecret bindings. |
 | Notification plays a sound but no banner | **macOS:** expected if the app is frontmost (macOS suppresses it) — switch apps. Otherwise set the app's macOS notification style to **Alerts**. |
 | App won't open ("unidentified developer") | Apps are ad-hoc signed and built locally (not quarantined); if macOS still blocks, right-click → **Open** once. |
 | **Linux:** app doesn't appear in the app menu | The build refreshes the desktop caches, but some sessions only re-scan on login. Log out and back in, or run `update-desktop-database ~/.local/share/applications`. |
 | **Linux:** all the apps share one taskbar icon | You're running a build from before the per-service `WM_CLASS` fix — rebuild with `./build-linux.sh`. |
 | **Linux:** notifications show a generic icon / wrong app name | The `.desktop` filename must match the app's slug (see **Desktop integration on Linux**). Rebuild rather than renaming files by hand. |
 | **Linux:** Calendar reminder never appeared | Calendar only fires reminders with a Calendar view open. If it was open, see [Notification paths on Linux](#notification-paths-on-linux) for the one path that can't be delivered. |
-| **Linux:** links open in the wrong browser | The app prefers Chrome/Chromium on `PATH`, else your `xdg-open` default. Set `ELECTRON_APPS_BROWSER=/path/to/browser` to pin it. |
+| **Linux:** links open in the wrong browser | The app prefers Chrome/Chromium (native or Flatpak), else your default browser. Set `ELECTRON_APPS_BROWSER=/path/to/browser` to pin it. |
+| **Linux (GNOME):** busy cursor for a while after launching an app | Fixed — launchers now set `StartupNotify=false`. GNOME caches launcher files, so after rebuilding, log out and back in once. |
 | **Linux:** `gmail: command not found` | `~/.local/bin` isn't on your `PATH` (the build warns about this), or launch from the app menu instead. |
 | Need to re-login everywhere | Sessions are per-app and per-account-slot by design (full isolation). |
 | Corporate (SSO) sign-in opens in Chrome / can't complete | The IdP isn't recognized. If it's on a company vanity domain, add it via `ELECTRON_APPS_AUTH_DOMAINS` or `auth-domains.json` (see **Enterprise SSO** above), then retry. |
@@ -746,6 +842,7 @@ workaround this app replaces.
 - Builds for the **host architecture** automatically (`uname -m`). On macOS export
   `ARCH=universal` for a fat binary; on Linux set `ARCH=arm64`/`x64` to cross-target.
 - Web Calendar has no native snooze in notifications (a Google limitation, not this app).
+- `mailto:` handling is registered on Linux only; macOS doesn't register the scheme yet.
 - On Linux, notifications posted from inside a service worker can't be displayed — see
   [Notification paths on Linux](#notification-paths-on-linux). Calendar reminders are not
   affected.
