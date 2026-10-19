@@ -381,6 +381,13 @@ Design points that are load-bearing, not incidental:
   and made safe by the round-trip, which never reports success it didn't observe (macOS note:
   the `security -w` key is briefly visible in `ps` — a stdin path would be better once someone
   can verify it on real macOS).
+- **Key creation is serialised by a lock file** (`<storeDir>/.key-create.lock`, `O_EXCL`).
+  Store-then-read-back alone does not converge: apps starting a few hundred ms apart each
+  store their own key and read it back before the next one's store lands, so each keeps a
+  different key while the keyring keeps only the last. Measured: six apps started together
+  all logged `ready`, and the published file then failed to decrypt with the keyring's key.
+  A test with staggered starts gave 3-4 distinct keys among six workers without the lock,
+  one with it. Check with a real decrypt of the `.enc` files, not with the `ready` log line.
 - **Publish on `did-finish-load`, not only on cookie-`changed`.** Cookies restored from disk
   on a normal launch arrive with no `changed` event, so a signed-in app that just starts up
   would never share its session. The cookie listener still covers interactive login and

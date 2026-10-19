@@ -125,32 +125,82 @@ let keyBackendName = null;
 // feature stays off. We do not decide by platform or by probing for a binary; we find out by
 // using it. First, adopt a key any backend already holds. Otherwise create one and confirm
 // it reads back: a backend whose binary is absent, whose store is locked, or that silently
-// drops the write fails that round-trip and is passed over. The re-read also settles the race
-// where two apps start together — each adopts whatever value is canonical afterwards, so they
-// converge rather than encrypting with divergent keys.
+// drops the write fails that round-trip and is passed over.
+//
+// Creation is serialised across the apps by a lock file. The read-back alone was meant to
+// settle two apps creating a key at once, and does not: each stores its own key and reads
+// back the keyring BEFORE the other's store lands, so each keeps a different key and the
+// keyring keeps only the last. Measured with six apps started together on a machine with
+// no key yet: all six logged "ready", and the published session file then failed to
+// decrypt with the keyring's key — every app was encrypting for itself alone.
+async function adoptExistingKey() {
+  for (const be of KEYRING_BACKENDS) {
+    const r = await be.lookup();
+    if (r.missing) continue;
+    const key = parseKey(r.stdout);
+    if (key) { keyBackendName = be.name; return key; }
+  }
+  return null;
+}
+
+const KEY_LOCK_WAIT_MS = 20000;
+// Store plus read-back takes well under a second. A lock older than this was left by an app
+// that died holding it, and waiting on it would only delay the next one for nothing.
+const KEY_LOCK_STALE_MS = 30000;
+
+// Resolves to a release function. If the lock cannot be had in time, proceed without it:
+// a rare race beats a feature that never starts.
+async function takeKeyLock() {
+  if (!ctx) return () => {};
+  const lock = path.join(ctx.storeDir, '.key-create.lock');
+  try { fs.mkdirSync(ctx.storeDir, { recursive: true, mode: 0o700 }); } catch (e) { /* surfaces below */ }
+  const deadline = Date.now() + KEY_LOCK_WAIT_MS;
+  while (Date.now() < deadline) {
+    try {
+      fs.closeSync(fs.openSync(lock, 'wx')); // atomic: exactly one creator wins
+      return () => { try { fs.unlinkSync(lock); } catch (e) { /* already gone */ } };
+    } catch (e) {
+      if (e.code !== 'EEXIST') return () => {};
+      try {
+        if (Date.now() - fs.statSync(lock).mtimeMs > KEY_LOCK_STALE_MS) fs.unlinkSync(lock);
+      } catch (e2) { /* released between the two calls — just retry */ }
+      await new Promise((r) => setTimeout(r, 150));
+    }
+  }
+  return () => {};
+}
+
 let keyPromise = null;
 function getKey() {
   if (keyPromise) return keyPromise;
   keyPromise = (async () => {
-    for (const be of KEYRING_BACKENDS) {
-      const r = await be.lookup();
-      if (r.missing) continue;
-      const key = parseKey(r.stdout);
-      if (key) { keyBackendName = be.name; return key; }
+    const existing = await adoptExistingKey();
+    if (existing) return existing;
+    const release = await takeKeyLock();
+    try {
+      // Whoever held the lock before us may have just created it.
+      const created = await adoptExistingKey();
+      if (created) return created;
+      return await createKey();
+    } finally {
+      release();
     }
-    for (const be of KEYRING_BACKENDS) {
-      const probe = await be.lookup();
-      if (probe.missing) continue; // backend binary not installed
-      const fresh = crypto.randomBytes(32).toString('base64');
-      const stored = await be.store(fresh);
-      if (stored.missing || stored.failed) continue;
-      const back = await be.lookup();
-      const key = parseKey(back.stdout); // any valid 32-byte value proves the backend works
-      if (key) { keyBackendName = be.name; return key; }
-    }
-    return null;
   })().catch(() => null);
   return keyPromise;
+}
+
+async function createKey() {
+  for (const be of KEYRING_BACKENDS) {
+    const probe = await be.lookup();
+    if (probe.missing) continue; // backend binary not installed
+    const fresh = crypto.randomBytes(32).toString('base64');
+    const stored = await be.store(fresh);
+    if (stored.missing || stored.failed) continue;
+    const back = await be.lookup();
+    const key = parseKey(back.stdout); // any valid 32-byte value proves the backend works
+    if (key) { keyBackendName = be.name; return key; }
+  }
+  return null;
 }
 
 // --- crypto ----------------------------------------------------------------------------
