@@ -47,6 +47,7 @@ desktop app, is what most of `lib/` and `preload.js` are for.
 | `icons/*.icns`, `icons/png/` | App artwork. The Linux build extracts PNG from `.icns` automatically. |
 | `docs/` | README images, generated from `icons/png/`. |
 | `styles/<slug>.css` | Optional per-app CSS, injected on that app's own host. `styles/gmail.css` is the shipped example. |
+| `scripts/<slug>.js` | Optional per-app page script, same host-only terms as the CSS, for what a stylesheet can't do. `scripts/gmail.js` makes Delete press Gmail's Delete button outside text fields (works with keyboard shortcuts off). |
 | `icons/png/<icon>.png` | App artwork. Tidal's came from its own web app manifest, which is where to look for any site's icon. |
 | `icons/theme/<Theme>/` | Icons hand-authored to match a specific icon theme, for apps that theme has nothing for. Not installed by the build — copied in by hand, and re-copied after a theme update. |
 
