@@ -265,6 +265,13 @@ platform *already* delivers shows the user two identical banners. Measured on El
 | `registration.showNotification(...)` from the page | never | mirror it |
 | `showNotification(...)` inside a service worker | never | **cannot be fixed** — worker preloads run in a separate realm |
 
+Clicking any of them raises the window that posted it (`focusFromNotification`), which logs
+`notification click (<source>) → slot N focused` or `NOT focused`. On GNOME Wayland only a
+real click is honoured: Electron hands libnotify's activation token to the next raise, and a
+synthetic click (CDP `dispatchEvent`) has none, so it logs `NOT focused` — that is expected,
+not a bug. Verify with a real click on a banner. Main-process `Notification` objects must be
+held until clicked or closed (`live`); a collected one leaves its banner up but drops the click.
+
 ### Context menu & spell check
 
 **`webPreferences.spellcheck: true` gets you squiggles and nothing else.** Electron ships no
