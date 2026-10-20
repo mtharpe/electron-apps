@@ -54,6 +54,7 @@
   input::placeholder { color: var(--muted); }
   th.launch, td.launch { width: 1%; white-space: nowrap; text-align: center; }
   td.launch input, label.reopen input { width: auto; accent-color: var(--accent); }
+  body.single .launch, body.single label.reopen { display: none; }
   label.reopen { display: flex; align-items: center; gap: 6px; margin-top: 12px; }
   td.detected { width: 34%; color: var(--muted); font-size: 12px; white-space: nowrap;
                 overflow: hidden; text-overflow: ellipsis; }
@@ -171,6 +172,8 @@
     }
 
     document.getElementById('reopen').checked = !!data.reopenAccounts;
+    // One account only (services.conf "single"): it always opens, so there is nothing to pick.
+    document.body.classList.toggle('single', !!data.single);
     document.getElementById('note').textContent = data.profiles.length
       ? ''
       : 'No Chrome profiles found — links will open in the focused window.';

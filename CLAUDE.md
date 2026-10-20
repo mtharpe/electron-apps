@@ -25,7 +25,7 @@ desktop app, is what most of `lib/` and `preload.js` are for.
 
 | File | Role |
 |---|---|
-| `services.conf` | **The app list.** `name \| icon \| url \| bundle-id \| categories \| related \| drm \| paths \| handlers` — the last four optional. The header comment documents each field. Read by both installers. |
+| `services.conf` | **The app list.** `name \| icon \| url \| bundle-id \| categories \| related \| drm \| paths \| handlers \| single` — the last five optional. The header comment documents each field. Read by both installers. |
 | `select-services.sh` | Turns user input (names, menu numbers, `--all`) into the set to build. Shared by both installers. |
 | `prereqs.sh` | `ensure_prereqs`: checks node/npm/curl/python3 (required) and rsvg-convert + a keyring client (optional), and offers to install what is missing via the system package manager — asks first; `INSTALL_PREREQS=1`/`0` to decide in scripts. Image-based hosts get the command instead. Shared by both installers. |
 | `build-linux.sh` | Linux: package, install under `$PREFIX`, write `.desktop` + icon ladder, resolve the icon theme. |
@@ -109,7 +109,7 @@ largest embedded PNG itself. A bare `icons/png/linear.png` is enough **for Linux
 
 The fifth field is a [freedesktop category
 list](https://specifications.freedesktop.org/menu-spec/latest/apa.html); macOS ignores it.
-Four optional fields follow, all empty for a typical app — see `services.conf`'s header:
+Five optional fields follow, all empty for a typical app — see `services.conf`'s header:
 
 - `related` — other registrable domains the product spans, kept in-app (Messenger:
   `messenger.com`).
@@ -124,6 +124,9 @@ Four optional fields follow, all empty for a typical app — see `services.conf`
   encoded link (Gmail: `mailto=https://mail.google.com/mail/?extsrc=mailto&url=%s`). Linux
   declares it in the `.desktop` file; the user still picks the default
   (`gio mime x-scheme-handler/mailto gmail.desktop`).
+- `single` — `1` for a one-account app (Google Messages, Messenger): Account 1 only, no
+  New Account Window, nothing else opens at launch. The shared `accounts.json` keeps its
+  six slots regardless (`ACCOUNT_SLOTS`); this bounds the app's windows (`WINDOW_SLOTS`).
 
 ### 3. Build just that app
 

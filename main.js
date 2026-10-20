@@ -24,7 +24,7 @@ const {
 } = require('./lib/theme');
 const theme = require('./lib/theme');
 const {
-  ACCOUNT_SLOTS, PROFILE_AUTO, PROFILE_NONE, loadAccounts, watchAccountsFile, accountConfig,
+  WINDOW_SLOTS, PROFILE_AUTO, PROFILE_NONE, loadAccounts, watchAccountsFile, accountConfig,
   persistSlots, accounts, chromeProfiles, profileForSlot, accountLabel, rememberAccountEmail,
   refreshAccountPresentation,
 } = require('./lib/accounts');
@@ -56,6 +56,8 @@ app.on('web-contents-created', (e, wc) => {
 });
 
 function openAccountWindow(n) {
+  // A single-account app has only Account 1; anything asking for another gets that one.
+  if (!Number.isInteger(n) || n < 1 || n > WINDOW_SLOTS) n = 1;
   const existing = windows.get(n);
   if (existing && !existing.isDestroyed()) {
     existing.focus();
@@ -169,7 +171,7 @@ handlers.setOpener(openHandledWindow);
 // With every slot occupied this returns 1, and openAccountWindow focuses that window rather
 // than opening anything — the honest outcome of "there is no free slot".
 function nextFreeSlot() {
-  for (let i = 1; i <= ACCOUNT_SLOTS; i++) {
+  for (let i = 1; i <= WINDOW_SLOTS; i++) {
     const w = windows.get(i);
     if (!w || w.isDestroyed()) return i;
   }
@@ -205,7 +207,8 @@ function openAccountsWindow() {
 
 ipcMain.handle('accounts:load', () => ({
   reopenAccounts: getReopenAccounts(),
-  slots: Array.from({ length: ACCOUNT_SLOTS }, (unused, i) => {
+  single: WINDOW_SLOTS === 1,
+  slots: Array.from({ length: WINDOW_SLOTS }, (unused, i) => {
     const n = i + 1;
     const cfg = accountConfig(n);
     const resolved = profileForSlot(n);
@@ -229,7 +232,7 @@ ipcMain.handle('accounts:save', (event, incoming, launch) => {
   const touched = [];
   for (const row of incoming) {
     const n = Number(row && row.n);
-    if (!Number.isInteger(n) || n < 1 || n > ACCOUNT_SLOTS) continue;
+    if (!Number.isInteger(n) || n < 1 || n > WINDOW_SLOTS) continue;
     touched.push(n);
     let profile = typeof row.chromeProfile === 'string' ? row.chromeProfile : PROFILE_AUTO;
     if (profile !== PROFILE_AUTO && profile !== PROFILE_NONE && !known.has(profile)) profile = PROFILE_AUTO;
