@@ -34,6 +34,10 @@ const handlers = require('./lib/handlers');
 const { nativeNotification } = require('./lib/notifications');
 const { attachLoadRecovery, recoverAfterResume } = require('./lib/recovery');
 const {
+  loadRestoreState, takeLaunchSlots, noteWindowOpened, noteWindowClosed,
+  getReopenAccounts, setReopenAccounts, getLaunchSlots, setLaunchSlots,
+} = require('./lib/window-restore');
+const {
   loadCustomCss, applyCustomStyles, manageWindowTitle, attachContextMenu,
 } = require('./lib/page-tweaks');
 const menu = require('./lib/menu');
@@ -102,6 +106,7 @@ function openAccountWindow(n) {
 
   win.maximize();
   windows.set(n, win);
+  noteWindowOpened(n);
   // Publish this slot's session once its page is up. The cookie-'changed' listener in
   // session-sync only fires on an interactive login or a rotation — cookies restored from
   // disk on a normal launch arrive with no event — so a signed-in app that just starts up
@@ -118,6 +123,7 @@ function openAccountWindow(n) {
   win.on('closed', () => {
     if (revealTimer) { clearTimeout(revealTimer); revealTimer = null; }
     windows.delete(n);
+    noteWindowClosed(n, [...windows.keys()].filter((i) => !windows.get(i).isDestroyed()));
   });
   return win;
 }
@@ -177,8 +183,8 @@ function openAccountsWindow() {
     return open;
   }
   const accountsWindow = new BrowserWindow(Object.assign({
-    width: 660,
-    height: 480,
+    width: 720,
+    height: 520,
     title: 'Accounts',
     backgroundColor: windowBackground(),
     // This is our own page, not Google's — so it gets the ordinary hardened defaults
@@ -198,6 +204,7 @@ function openAccountsWindow() {
 }
 
 ipcMain.handle('accounts:load', () => ({
+  reopenAccounts: getReopenAccounts(),
   slots: Array.from({ length: ACCOUNT_SLOTS }, (unused, i) => {
     const n = i + 1;
     const cfg = accountConfig(n);
@@ -208,12 +215,13 @@ ipcMain.handle('accounts:load', () => ({
       chromeProfile: cfg.chromeProfile || PROFILE_AUTO,
       email: cfg.email || '',
       resolvedProfile: resolved ? resolved.name : '',
+      openAtLaunch: getLaunchSlots().includes(n),
     };
   }),
   profiles: chromeProfiles(),
 }));
 
-ipcMain.handle('accounts:save', (event, incoming) => {
+ipcMain.handle('accounts:save', (event, incoming, launch) => {
   if (!Array.isArray(incoming)) return false;
   // Validate rather than trust: an ipcMain handler is reachable from any renderer, and a
   // profile directory that Chrome doesn't have would send links into a profile it invents.
@@ -230,7 +238,13 @@ ipcMain.handle('accounts:save', (event, incoming) => {
     accounts.set(n, Object.assign(accountConfig(n), { name, chromeProfile: profile }));
   }
   persistSlots(touched);
+  // Startup choices are this app's own (window-restore.js), not the shared accounts.json.
+  if (launch && typeof launch === 'object') {
+    if (Array.isArray(launch.slots)) setLaunchSlots(launch.slots.map(Number));
+    if (typeof launch.reopen === 'boolean') setReopenAccounts(launch.reopen);
+  }
   refreshAccountPresentation();
+  buildMenu();
   return true;
 });
 
@@ -256,6 +270,7 @@ sessionSync.init({
   log: logRecovery,
 });
 loadThemePreference();
+loadRestoreState();
 applyColorScheme();
 // Before app ready on purpose: GTK reads GTK_THEME once, when the toolkit initializes.
 applyGtkTheme();
@@ -309,7 +324,8 @@ if (!gotSingleInstanceLock) {
     }, APP_ICON ? { iconPath: APP_ICON } : {}));
 
     buildMenu();
-    openAccountWindow(1);
+    // Highest slot first, so Account 1 — the one a handled link goes to — ends up in front.
+    takeLaunchSlots().reverse().forEach((n) => openAccountWindow(n));
     const launchTarget = handlers.handledUrlFromArgv(process.argv);
     if (launchTarget) openHandledWindow(1, launchTarget);
 

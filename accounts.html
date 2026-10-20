@@ -52,6 +52,9 @@
   }
   input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
   input::placeholder { color: var(--muted); }
+  th.launch, td.launch { width: 1%; white-space: nowrap; text-align: center; }
+  td.launch input, label.reopen input { width: auto; accent-color: var(--accent); }
+  label.reopen { display: flex; align-items: center; gap: 6px; margin-top: 12px; }
   td.detected { width: 34%; color: var(--muted); font-size: 12px; white-space: nowrap;
                 overflow: hidden; text-overflow: ellipsis; }
   footer { display: flex; align-items: center; gap: 8px; margin-top: 18px; }
@@ -68,7 +71,8 @@
   <h1>Accounts</h1>
   <p class="intro">
     Links clicked in an account window open in its Chrome profile. Leave a name blank to use
-    the Chrome profile's own name.
+    the Chrome profile's own name. Accounts marked <em>Open at launch</em> open every time this
+    app starts.
   </p>
 
   <table>
@@ -78,10 +82,16 @@
         <th>Name</th>
         <th>Chrome profile</th>
         <th>Signed in as</th>
+        <th class="launch" title="Open this account's window every time the app starts">Open at launch</th>
       </tr>
     </thead>
     <tbody id="rows"></tbody>
   </table>
+
+  <label class="reopen">
+    <input type="checkbox" id="reopen">
+    Also reopen the account windows that were open when the app last quit
+  </label>
 
   <footer>
     <span class="note" id="note"></span>
@@ -146,9 +156,21 @@
         : 'Detected once this account window has loaded';
       tr.appendChild(detected);
 
+      const launchCell = document.createElement('td');
+      launchCell.className = 'launch';
+      const launch = document.createElement('input');
+      launch.type = 'checkbox';
+      launch.className = 'launch';
+      launch.dataset.slot = slot.n;
+      launch.checked = !!slot.openAtLaunch;
+      launch.setAttribute('aria-label', 'Open account ' + slot.n + ' at launch');
+      launchCell.appendChild(launch);
+      tr.appendChild(launchCell);
+
       tbody.appendChild(tr);
     }
 
+    document.getElementById('reopen').checked = !!data.reopenAccounts;
     document.getElementById('note').textContent = data.profiles.length
       ? ''
       : 'No Chrome profiles found — links will open in the focused window.';
@@ -163,7 +185,13 @@
   }
 
   document.getElementById('save').addEventListener('click', async () => {
-    await window.accountsApi.save(collect());
+    const launchSlots = slots
+      .filter((slot) => document.querySelector('input.launch[data-slot="' + slot.n + '"]').checked)
+      .map((slot) => slot.n);
+    await window.accountsApi.save(collect(), {
+      slots: launchSlots,
+      reopen: document.getElementById('reopen').checked,
+    });
     window.accountsApi.close();
   });
   document.getElementById('cancel').addEventListener('click', () => window.accountsApi.close());

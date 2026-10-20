@@ -40,6 +40,7 @@ desktop app, is what most of `lib/` and `preload.js` are for.
 | `lib/routing.js` | Whether a URL loads in-app or goes to the real browser, and how it gets there. |
 | `lib/notifications.js` | Native notifications and the web-notification mirror. |
 | `lib/recovery.js` | Retry after a failed navigation; reload after the machine wakes. |
+| `lib/window-restore.js` | Which account windows open at launch: "Open at launch" slots plus, while Reopen is on, the last session's. Per app, in `<userData>/restore.json` — not the shared `accounts.json`. |
 | `lib/page-tweaks.js` | Per-webContents page adjustments: custom CSS, window title, context menu. |
 | `lib/menu.js` | The application menu. |
 | `preload.js` | Runs in the page's main world: the stealth layer + notification mirror. |

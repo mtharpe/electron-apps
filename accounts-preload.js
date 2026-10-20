@@ -6,6 +6,6 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('accountsApi', {
   load: () => ipcRenderer.invoke('accounts:load'),
-  save: (slots) => ipcRenderer.invoke('accounts:save', slots),
+  save: (slots, launch) => ipcRenderer.invoke('accounts:save', slots, launch),
   close: () => ipcRenderer.send('accounts:close'),
 });
