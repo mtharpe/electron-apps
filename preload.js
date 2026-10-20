@@ -151,15 +151,46 @@
     //       handler that asks the main process to focus this window. This runs ALONGSIDE the
     //       page's own onclick (which navigates to the right conversation) — the page's
     //       window.focus() can't raise the OS window from a renderer, the IPC can.
+    //
+    //     Held until closed: Google Messages keeps no reference to its notifications, and a
+    //     click on one opened from the tray minutes later did nothing at all (measured: GNOME
+    //     sent ActionInvoked, the app logged no click). Same failure as the main-process
+    //     `live` set in lib/notifications.js guards against.
+    const shown = new Set();
     if (window.Notification) {
       window.Notification = new Proxy(window.Notification, {
         construct(target, argList) {
           if (IS_MAC) { try { fire(argList[0], argList[1]); } catch (e) {} }
           const notif = Reflect.construct(target, argList, target);
           if (!IS_MAC && ipc) {
-            try { notif.addEventListener('click', () => { try { ipc.send('notification-focus'); } catch (e) {} }); } catch (e) {}
+            try {
+              shown.add(notif);
+              const release = () => shown.delete(notif);
+              notif.addEventListener('close', release);
+              notif.addEventListener('error', release);
+              notif.addEventListener('click', () => {
+                release();
+                try { ipc.send('notification-focus', 'page'); } catch (e) {}
+              });
+              ipc.send('notification-posted');
+            } catch (e) {}
           }
           return notif;
+        },
+      });
+    }
+
+    // 7c) Linux: a page asks for its window back by calling window.focus() from its own
+    //     notification click handler. That call cannot raise the OS window from a renderer,
+    //     so forward it. Covers notifications the 7a hook never saw — a Google Messages
+    //     click left the conversation open in a window that stayed behind. Only honoured
+    //     with a click's activation token, so a page focusing itself at any other time
+    //     changes nothing. A Proxy, like 7a, so the function still reads as native.
+    if (!IS_MAC && ipc && typeof window.focus === 'function') {
+      window.focus = new Proxy(window.focus, {
+        apply(target, thisArg, args) {
+          try { if (!document.hasFocus()) ipc.send('notification-focus', 'window.focus'); } catch (e) {}
+          return Reflect.apply(target, thisArg, args);
         },
       });
     }
