@@ -29,8 +29,9 @@ const {
   refreshAccountPresentation,
 } = require('./lib/accounts');
 const accountsModule = require('./lib/accounts');
-const { attachExternalLinkRouting, isFirstPartyHost } = require('./lib/routing');
+const { attachExternalLinkRouting, isFirstPartyHost, isFirstPartyUrl, inAppUrl } = require('./lib/routing');
 const handlers = require('./lib/handlers');
+const handoff = require('./lib/handoff');
 const { nativeNotification } = require('./lib/notifications');
 const { attachLoadRecovery, recoverAfterResume } = require('./lib/recovery');
 const {
@@ -160,6 +161,18 @@ function openHandledWindow(n, url) {
   return win;
 }
 handlers.setOpener(openHandledWindow);
+
+// A link another app handed over (lib/handoff.js) loads in Account 1's window -- the one a
+// single-account app like Messenger has -- rather than a pop-out: it is the app's own page.
+function openHandedLink(link) {
+  const url = inAppUrl(link);
+  const win = windows.get(1);
+  if (!win || win.isDestroyed()) { openAccountWindow(1).loadURL(url, { userAgent: CHROME_UA }); return; }
+  win.loadURL(url, { userAgent: CHROME_UA });
+  if (win.isMinimized()) win.restore();
+  win.show();
+  win.focus();
+}
 
 // ACCOUNT_SLOTS is the bound, not an arbitrary ceiling: this used to scan to 50, which meant
 // "New Account Window" past the sixth built a slot nothing else in the app could reach. The
@@ -307,6 +320,8 @@ if (!gotSingleInstanceLock) {
     // A handled link (mailto: in Gmail) goes to account 1, the account the app opens on.
     const target = handlers.handledUrlFromArgv(argv);
     if (target) { openHandledWindow(1, target); return; }
+    const link = handoff.linkFromArgv(argv, isFirstPartyUrl);
+    if (link) { openHandedLink(link); return; }
     const open = BrowserWindow.getAllWindows().filter((w) => !w.isDestroyed());
     if (open.length === 0) { openAccountWindow(nextFreeSlot()); return; }
     const win = open[0];
@@ -331,6 +346,9 @@ if (!gotSingleInstanceLock) {
     takeLaunchSlots().reverse().forEach((n) => openAccountWindow(n));
     const launchTarget = handlers.handledUrlFromArgv(process.argv);
     if (launchTarget) openHandledWindow(1, launchTarget);
+    const launchLink = handoff.linkFromArgv(process.argv, isFirstPartyUrl);
+    if (launchLink) openHandedLink(launchLink);
+    handoff.register();
 
     // On the very first launch, fire one native notification so the OS registers this app
     // with its notification settings (macOS only lists apps under System Settings →
