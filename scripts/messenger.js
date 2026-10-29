@@ -20,22 +20,46 @@
   window.__messengerNotify = true;
 
   const ROW = 'a[href*="/messages/t/"]';
-  const seen = new Map(); // conversation href -> last preview text notified or observed
+  // A change is held this long before it is announced, and dropped if the conversation was
+  // read meanwhile -- on the phone, say. It also folds a quick run of messages into one.
+  const SETTLE_MS = 3000;
+  // After a banner, a conversation stays quiet this long; whatever arrives in between is
+  // announced once, as its latest message, when it ends. A back-and-forth posted one banner
+  // per message before this (five in one minute, in the log).
+  const QUIET_MS = 60000;
+
+  const seen = new Map(); // conversation href -> last preview observed while unread
+  const chats = new Map(); // href -> { pending, since, lastAt, latest, banner }
   let primed = false;
 
+  const shown = (el) => el.getBoundingClientRect().width > 1 && !el.closest('[aria-hidden="true"]');
   const leaves = (row) => Array.from(row.querySelectorAll('span, div'))
-    .filter((n) => n.childElementCount === 0 && n.textContent.trim() && n.getBoundingClientRect().width > 1);
+    .filter((n) => n.childElementCount === 0 && n.textContent.trim() && shown(n));
 
-  // Name and preview from what is visible in the row: the bold leaf is the name; the preview is
-  // the longest remaining visible line (the timestamp and "·" are always short).
+  // Name and preview, read by structure. The first draft took the longest line of the row's
+  // innerText as the preview, and that line is often not the message: innerText includes a
+  // screen-reader-only presence label (1px wide, toggling as the friend comes and goes) and
+  // the relative timestamp ("23m"). For a short message either is longer -- so the banner
+  // read "23m", and the same unread chat was announced again every minute as it ticked.
+  // Measured on the live list: the name is the first bold leaf, and the timestamp is the
+  // first visible leaf after an aria-hidden "·". The preview is the visible text left over.
   const readRow = (row) => {
-    const bold = leaves(row).find((n) => Number(getComputedStyle(n).fontWeight) >= 600);
-    if (!bold) return null;
-    const name = bold.textContent.trim();
-    const preview = (row.innerText || '').split('\n').map((l) => l.trim())
-      .filter((l) => l && l !== name)
-      .sort((a, b) => b.length - a.length)[0] || '';
-    return { name, preview };
+    const visible = leaves(row);
+    const nameEl = visible.find((n) => Number(getComputedStyle(n).fontWeight) >= 600);
+    if (!nameEl) return null;
+    const sep = Array.from(row.querySelectorAll('[aria-hidden="true"]'))
+      .find((n) => n.textContent.trim() === '·');
+    const time = sep && visible.find((n) => sep.compareDocumentPosition(n) & Node.DOCUMENT_POSITION_FOLLOWING);
+    const parts = [];
+    const walk = document.createTreeWalker(row, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT);
+    for (let n = walk.nextNode(); n; n = walk.nextNode()) {
+      // Emoji render as <img alt="😂">; without this an emoji-only message has no preview.
+      if (n.nodeType === 1) { if (n.tagName === 'IMG' && n.alt && shown(n)) parts.push(n.alt); continue; }
+      if (!n.textContent.trim() || !shown(n.parentElement)) continue;
+      if (nameEl.contains(n) || (time && time.contains(n))) continue;
+      parts.push(n.textContent.trim());
+    }
+    return { name: nameEl.textContent.trim(), preview: parts.join(' ') };
   };
 
   const open = (href) => {
@@ -45,24 +69,65 @@
     else location.href = href;
   };
 
+  // The user is looking at the app, or at this very conversation in a window they can see
+  // but have not focused (a second monitor).
+  const reading = (href) => document.hasFocus()
+    || (document.visibilityState === 'visible' && location.pathname === new URL(href, location.href).pathname);
+
+  const chat = (href) => {
+    if (!chats.has(href)) chats.set(href, { pending: false, since: 0, lastAt: 0, latest: null, banner: null });
+    return chats.get(href);
+  };
+
+  const closeBanner = (c) => {
+    if (!c.banner) return;
+    try { c.banner.close(); } catch (e) { /* already gone */ }
+    c.banner = null;
+  };
+
+  const post = (href, c) => {
+    closeBanner(c);
+    try {
+      const n = new Notification(c.latest.name, { body: c.latest.preview.slice(0, 200), tag: href });
+      n.addEventListener('click', () => open(href));
+      n.addEventListener('close', () => { if (c.banner === n) c.banner = null; });
+      c.banner = n;
+    } catch (e) { /* a notification is a nicety; never break the page */ }
+  };
+
   const scan = () => {
+    const now = Date.now();
     const rows = Array.from(document.querySelectorAll(ROW));
     rows.forEach((row, index) => {
       const href = row.getAttribute('href');
       const unread = readRow(row);
-      if (!unread) { seen.delete(href); return; }
+      if (!unread) {
+        // Read -- here or on another device. Its banner is stale now; take it down.
+        seen.delete(href);
+        if (chats.has(href)) { const c = chats.get(href); c.pending = false; closeBanner(c); }
+        return;
+      }
       const known = seen.has(href);
-      if (seen.get(href) === unread.preview) return;
-      seen.set(href, unread.preview);
-      // The first pass only learns what is already unread; that is old news, not an arrival.
-      // Nor while the window is focused: the user is looking at the list already. A row seen
-      // for the first time is an arrival only near the top -- further down it is an old
-      // unread conversation the list just rendered because the user scrolled.
-      if (!primed || document.hasFocus() || (!known && index > 2)) return;
-      try {
-        const n = new Notification(unread.name, { body: unread.preview.slice(0, 200), tag: href });
-        n.addEventListener('click', () => open(href));
-      } catch (e) { /* a notification is a nicety; never break the page */ }
+      if (seen.get(href) !== unread.preview) {
+        seen.set(href, unread.preview);
+        // The first pass only learns what is already unread; that is old news, not an
+        // arrival. A row seen for the first time is an arrival only near the top -- further
+        // down it is an old unread conversation the list just rendered because the user
+        // scrolled.
+        if (primed && (known || index <= 2)) {
+          const c = chat(href);
+          if (!c.pending) { c.pending = true; c.since = now; }
+          c.latest = unread;
+        }
+      }
+    });
+    chats.forEach((c, href) => {
+      if (!c.pending) return;
+      if (reading(href)) { c.pending = false; return; }
+      if (now - c.since < SETTLE_MS || now - c.lastAt < QUIET_MS) return;
+      c.pending = false;
+      c.lastAt = now;
+      post(href, c);
     });
     // Not until the list has rendered: a pass over an empty list would learn nothing, and the
     // next one would announce every unread conversation.
