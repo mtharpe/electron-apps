@@ -32,12 +32,13 @@ desktop app, is what most of `lib/` and `preload.js` are for.
 | `build.sh` | macOS: package, install to `~/Applications`, ad-hoc codesign. Dispatches to `build-linux.sh` on Linux. |
 | `main.js` | Entry point only: creates the windows, wires the modules together, owns the app lifecycle. ~320 lines. |
 | `lib/config.js` | This app's identity, read from `app-config.json`. `ROOT` is here — modules under `lib/` must resolve bundled files against it, not `__dirname`. |
-| `lib/util.js` | `wait`, `logRecovery`, `hasSuffix`. Depends on nothing. |
+| `lib/util.js` | `wait`, `logRecovery`, `hasSuffix`, `pathUnder`. Depends on nothing. |
 | `lib/window-registry.js` | Owns the slot→window map and the Accounts window. Depends on nothing — that is the point; it is what keeps theme/accounts/recovery from requiring each other. |
 | `lib/chromium.js` | Stealth UA + client hints, `STEALTH_WEBPREFS`, per-session header spoof, the Widevine wait. |
 | `lib/theme.js` | Light/dark: the appearance portal, the GTK frame, the pinned preference. |
 | `lib/accounts.js` | Account slots: `accounts.json`, Chrome's profile list, labels, slot identity. The data layer — knows nothing about menus or windows. |
-| `lib/routing.js` | Whether a URL loads in-app or goes to the real browser, and how it gets there. |
+| `lib/routing.js` | Whether a URL loads in-app or goes to the real browser, and how it gets there. Out-of-scope pages on a path-scoped app's own domain open in an in-app viewer window. |
+| `lib/handoff.js` | A link headed for the browser that another installed app claims opens in that app instead. Each app registers its claim in `<appData>/electron-apps/apps/<slug>.json` at startup. |
 | `lib/notifications.js` | Native notifications and the web-notification mirror. |
 | `lib/recovery.js` | Retry after a failed navigation; reload after the machine wakes. |
 | `lib/window-restore.js` | Which account windows open at launch: "Open at launch" slots plus, while Reopen is on, the last session's. Per app, in `<userData>/restore.json` — not the shared `accounts.json`. |
@@ -49,7 +50,7 @@ desktop app, is what most of `lib/` and `preload.js` are for.
 | `icons/*.icns`, `icons/png/` | App artwork. The Linux build extracts PNG from `.icns` automatically. |
 | `docs/` | README images, generated from `icons/png/`. |
 | `styles/<slug>.css` | Optional per-app CSS, injected on that app's own host. `styles/gmail.css` is the shipped example. |
-| `scripts/<slug>.js` | Optional per-app page script, same host-only terms as the CSS, for what a stylesheet can't do. `scripts/gmail.js` makes Delete press Gmail's Delete button outside text fields (works with keyboard shortcuts off); `scripts/messenger.js` posts message notifications by watching the chat list, because Facebook only notifies via web push and Electron has no push service. |
+| `scripts/<slug>.js` | Optional per-app page script, same host-only terms as the CSS, for what a stylesheet can't do. `scripts/gmail.js` makes Delete press Gmail's Delete button outside text fields (works with keyboard shortcuts off); `scripts/messenger.js` posts message notifications by watching the chat list, because Facebook only notifies via web push and Electron has no push service: one banner per chat per minute, held 3s so a message read elsewhere never notifies, and taken down once the chat is read. |
 | `icons/png/<icon>.png` | App artwork. Tidal's came from its own web app manifest, which is where to look for any site's icon. |
 | `icons/theme/<Theme>/` | Icons hand-authored to match a specific icon theme, for apps that theme has nothing for. Not installed by the build — copied in by hand, and re-copied after a theme update. |
 
@@ -117,9 +118,12 @@ Five optional fields follow, all empty for a typical app — see `services.conf`
   and download.
 - `paths` — a URL-path allowlist on the app's own domain, for an app that is only a tenant
   of a bigger site (Messenger: `/messages`, the call and media pages, the auth flow).
-  Everything else on that domain opens in the real browser. A missing prefix shows up in
-  the log as `routed … to browser: https://<host>/<first-segment>/…` — that line names
-  what to add. Calls were broken this way until `/groupcall` and `/videocall` were added.
+  Everything else on that domain opens in an in-app **viewer window** (same session, free to
+  roam the domain), so a reel or shared post sent in a chat opens signed in while the main
+  window never leaves its paths. A prefix the *main window* needs (sign-in steps, calls)
+  shows up in the log as `opened viewer window for https://<host>/<first-segment>/…` —
+  that line names what to add. Calls were broken this way until `/groupcall` and
+  `/videocall` were added, and 2FA until `/two_factor`.
 - `handlers` — link schemes the app takes over, as `scheme=https-template` with `%s` for the
   encoded link (Gmail: `mailto=https://mail.google.com/mail/?extsrc=mailto&url=%s`). Linux
   declares it in the `.desktop` file; the user still picks the default
