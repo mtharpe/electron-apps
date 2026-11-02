@@ -270,6 +270,23 @@ function sessionHash(cookies) {
   return crypto.createHash('sha256').update(parts.join('\n')).digest('hex');
 }
 
+// How recent a session's sign-in is. Google sets SID's expiry once, at sign-in (35 days out),
+// and does not move it while the session is in use; only a new sign-in issues a new SID.
+// Measured: Account 1 in Gmail still held the SID from its 10-18 sign-in (expiring 11-22) on
+// 11-02, after two weeks of daily use. So a later expiry means a later sign-in, which is what
+// tells a live session from one the account's own policy has since ended. A Workspace account
+// that makes its users sign in again (Spectro Cloud's) leaves every app holding an SID that
+// still looks signed in but only gets the sign-in page. 0 when there is no SID-family cookie.
+function sessionFreshness(cookies) {
+  let t = 0;
+  for (const c of cookies) {
+    if (SIGNED_IN_NAMES.has(c.name) && typeof c.expirationDate === 'number' && c.expirationDate > t) {
+      t = c.expirationDate;
+    }
+  }
+  return t;
+}
+
 // --- store -----------------------------------------------------------------------------
 
 let ctx = null;         // { storeDir, emailForSlot, windowsForSlot, log }
@@ -292,10 +309,6 @@ async function authCookies(ses) {
   return (await ses.cookies.get({})).filter((c) => isAuthCookieHost(c.domain));
 }
 
-async function hasSession(ses) {
-  return !!sessionHash(await authCookies(ses));
-}
-
 // Publish the slot's current Google session, if it has one and it differs from what the
 // store already holds. Never publishes an empty session — a signed-out app must not wipe the
 // shared login for everyone else.
@@ -313,11 +326,20 @@ async function publish(slot) {
   const key = await getKey();
   if (!key) return;
 
-  // Skip a redundant write if another app already published this exact session.
+  // Skip a redundant write if another app already published this exact session, and never
+  // replace a session from a later sign-in with an older one. Every app publishes every
+  // account it holds at startup, so without the second check the last app to start won:
+  // measured on 11-02, Gmail published the work account's sign-in from that day and Tasks
+  // replaced it moments later with its own from 10-18, which Google had already ended. Each
+  // app that then adopted got a dead session, and the user signed in to every app by hand.
   try {
     const existing = fs.readFileSync(storeFile(email));
     const prior = JSON.parse(decrypt(key, existing));
     if (sessionHash(prior.cookies || []) === hash) { syncedHash.set(email, hash); return; }
+    if (sessionHash(prior.cookies || []) && sessionFreshness(prior.cookies) > sessionFreshness(cookies)) {
+      log('kept the stored session for ' + email + ' (it is from a later sign-in than this app\'s)');
+      return;
+    }
   } catch (e) { /* no readable prior file; fall through and write */ }
 
   const payload = JSON.stringify({
@@ -384,6 +406,24 @@ async function injectInto(ses, cookies) {
   return ok;
 }
 
+// Whether a slot should take the stored session: it has none, or the stored one comes from a
+// later sign-in than its own. Only ever asked while the slot is at Google sign-in, so an
+// app holding an older session that still works is never touched while in use. The second
+// case is a Workspace account whose policy ended the session: every app still holds an SID,
+// so "already has a session" skipped adoption and each app needed its own sign-in.
+function wantsStored(local, stored) {
+  if (!sessionHash(local)) return true;
+  return sessionFreshness(stored) > sessionFreshness(local);
+}
+
+// Drop the slot's own Google cookies before a newer session goes in, so nothing from the
+// ended session (a per-service cookie the new one doesn't carry) is left to mix with it.
+async function clearAuthCookies(ses, cookies) {
+  for (const c of cookies) {
+    try { await ses.cookies.remove(cookieUrl(c), c.name); } catch (e) { /* already gone */ }
+  }
+}
+
 // The Google sign-in host. An app only ever adopts a shared Google session when it actually
 // navigates here — which scopes the whole thing to apps that use Google to log in, and
 // nothing else. The Google apps land here when signed out; Tidal lands here during its
@@ -419,14 +459,16 @@ async function adoptForAuth(slot, wc) {
     const email = ctx.emailForSlot(slot);
     if (!email) return;
     const ses = session.fromPartition('persist:account-' + slot);
-    if (await hasSession(ses)) return; // already have a Google session; nothing to do
+    const local = await authCookies(ses);
 
     const data = await readStored(email);
     if (!data) return;
+    if (!wantsStored(local, data.cookies)) return; // ours is as recent; nothing to do
     const hash = sessionHash(data.cookies);
     if (attemptedHash.get(slot) === hash) return; // already tried this exact session — no loop
     attemptedHash.set(slot, hash);
 
+    if (sessionHash(local)) await clearAuthCookies(ses, local);
     const ok = await injectInto(ses, data.cookies);
     if (ok && !wc.isDestroyed()) {
       syncedHash.set(email, hash);
@@ -471,11 +513,13 @@ function onStoreChanged() {
         .filter((w) => w && !w.isDestroyed() && isGoogleAuthUrl(w.webContents.getURL()));
       if (!wins.length) continue;                      // no window here is at Google sign-in
       const ses = session.fromPartition('persist:account-' + slot);
-      if (await hasSession(ses)) continue;             // already signed in
+      const local = await authCookies(ses);
       const data = await readStored(email);
       if (!data) continue;
+      if (!wantsStored(local, data.cookies)) continue; // ours is as recent
       const hash = sessionHash(data.cookies);
       if (syncedHash.get(email) === hash) continue;    // already have this one
+      if (sessionHash(local)) await clearAuthCookies(ses, local);
       const injected = await injectInto(ses, data.cookies);
       if (!injected) continue;
       syncedHash.set(email, hash);
