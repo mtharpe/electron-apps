@@ -311,10 +311,12 @@ watchPortalColorScheme();
 app.userAgentFallback = CHROME_UA;
 // Drop the Electron build flag that can taint requests.
 app.commandLine.appendSwitch('disable-blink-features', 'AutomationControlled');
-// X11 (XWayland) on Linux, so a window can reopen where the user left it: under Wayland an
-// app cannot position its own window, and GNOME put every new one on the primary monitor.
-// ELECTRON_APPS_WAYLAND=1 keeps native Wayland for anyone who prefers it over placement.
-if (process.platform === 'linux' && process.env.ELECTRON_APPS_WAYLAND !== '1') {
+// X11 (XWayland) only on request (ELECTRON_APPS_X11=1). Under Wayland an app cannot position
+// its own window, so lib/window-place.js only takes effect on X11 -- but forcing X11 by
+// default was measured broken on 11-02 (Intel Arc, castlabs Electron 42): the GPU process
+// segfaulted at startup (exit_code=11) and no window ever drew (XGetWindowAttributes
+// failed), so every app failed to open.
+if (process.platform === 'linux' && process.env.ELECTRON_APPS_X11 === '1') {
   app.commandLine.appendSwitch('ozone-platform', 'x11');
 }
 // Keep EVERY window live — not just the focused one — so background account windows
