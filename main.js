@@ -14,7 +14,7 @@ const path = require('path');
 const fs = require('fs');
 
 const sessionSync = require('./session-sync');
-const { APP_NAME, APP_URL, APP_ICON, IS_MAC, ACCOUNTS_DIR } = require('./lib/config');
+const { APP_NAME, APP_URL, APP_HOST, APP_ICON, IS_MAC, ACCOUNTS_DIR } = require('./lib/config');
 const { logRecovery } = require('./lib/util');
 const { windows, focusWindow, getAccountsWindow, setAccountsWindow } = require('./lib/window-registry');
 const { CHROME_UA, STEALTH_WEBPREFS, spoofSession, whenWidevineReady } = require('./lib/chromium');
@@ -29,7 +29,7 @@ const {
   refreshAccountPresentation,
 } = require('./lib/accounts');
 const accountsModule = require('./lib/accounts');
-const { attachExternalLinkRouting, isFirstPartyHost, isFirstPartyUrl, inAppUrl } = require('./lib/routing');
+const { attachExternalLinkRouting, isFirstPartyHost, isFirstPartyUrl, isAuthHost, inAppUrl } = require('./lib/routing');
 const handlers = require('./lib/handlers');
 const handoff = require('./lib/handoff');
 const { nativeNotification } = require('./lib/notifications');
@@ -283,6 +283,16 @@ sessionSync.init({
   storeDir: path.join(ACCOUNTS_DIR, 'sessions'),
   emailForSlot: (n) => accountConfig(n).email,
   windowsForSlot: (n) => { const w = windows.get(n); return w ? [w] : []; },
+  isIdpHost: isAuthHost,
+  // A window on this app's own page is signed in -- if this app is a Google one. Its pages
+  // are what a dead Google session never reaches, so they are the proof a session works.
+  isAppPage: (url) => {
+    try {
+      const h = new URL(url).hostname.toLowerCase();
+      return /(^|\.)google\.com$/.test(APP_HOST) && (h === APP_HOST || h.endsWith('.' + APP_HOST));
+    } catch (e) { return false; }
+  },
+  loadHome: (wc) => wc.loadURL(APP_URL, { userAgent: CHROME_UA }).catch(() => {}),
   log: logRecovery,
 });
 loadThemePreference();

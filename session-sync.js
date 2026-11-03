@@ -270,23 +270,6 @@ function sessionHash(cookies) {
   return crypto.createHash('sha256').update(parts.join('\n')).digest('hex');
 }
 
-// How recent a session's sign-in is. Google sets SID's expiry once, at sign-in (35 days out),
-// and does not move it while the session is in use; only a new sign-in issues a new SID.
-// Measured: Account 1 in Gmail still held the SID from its 10-18 sign-in (expiring 11-22) on
-// 11-02, after two weeks of daily use. So a later expiry means a later sign-in, which is what
-// tells a live session from one the account's own policy has since ended. A Workspace account
-// that makes its users sign in again (Spectro Cloud's) leaves every app holding an SID that
-// still looks signed in but only gets the sign-in page. 0 when there is no SID-family cookie.
-function sessionFreshness(cookies) {
-  let t = 0;
-  for (const c of cookies) {
-    if (SIGNED_IN_NAMES.has(c.name) && typeof c.expirationDate === 'number' && c.expirationDate > t) {
-      t = c.expirationDate;
-    }
-  }
-  return t;
-}
-
 // --- store -----------------------------------------------------------------------------
 
 let ctx = null;         // { storeDir, emailForSlot, windowsForSlot, log }
@@ -326,20 +309,23 @@ async function publish(slot) {
   const key = await getKey();
   if (!key) return;
 
-  // Skip a redundant write if another app already published this exact session, and never
-  // replace a session from a later sign-in with an older one. Every app publishes every
-  // account it holds at startup, so without the second check the last app to start won:
-  // measured on 11-02, Gmail published the work account's sign-in from that day and Tasks
-  // replaced it moments later with its own from 10-18, which Google had already ended. Each
-  // app that then adopted got a dead session, and the user signed in to every app by hand.
+  // Skip a redundant write if another app already published this exact session. Then: only a
+  // session shown to work may replace a stored one. "Shown to work" is the slot's window
+  // having loaded its own Google app page (see isLive) -- a dead session never gets there,
+  // Google sends it to sign-in first. Until then a session is only stored where nothing is.
+  //
+  // Why: every app publishes every account it holds, at startup and as cookies change, and
+  // jars go stale (signed out, ended by policy, revoked) while their cookies stay. Last writer
+  // won, then "most recent sign-in" won -- and both put dead sessions in the store, measured
+  // on 11-02: a signed-out test profile took the stored personal session and landed on
+  // Google's account chooser twice, while the user's own apps refused to share their working
+  // copies because the dead one looked newer. Each app then needed its own sign-in.
+  const live = isLive(slot);
   try {
     const existing = fs.readFileSync(storeFile(email));
     const prior = JSON.parse(decrypt(key, existing));
     if (sessionHash(prior.cookies || []) === hash) { syncedHash.set(email, hash); return; }
-    if (sessionHash(prior.cookies || []) && sessionFreshness(prior.cookies) > sessionFreshness(cookies)) {
-      log('kept the stored session for ' + email + ' (it is from a later sign-in than this app\'s)');
-      return;
-    }
+    if (!live && sessionHash(prior.cookies || [])) return; // keep what is stored; ours is unproven
   } catch (e) { /* no readable prior file; fall through and write */ }
 
   const payload = JSON.stringify({
@@ -362,7 +348,7 @@ async function publish(slot) {
     fs.writeFileSync(tmp, encrypt(key, payload), { mode: 0o600 });
     fs.renameSync(tmp, storeFile(email)); // atomic: a reader never sees a half-written file
     syncedHash.set(email, hash);
-    log('published session for ' + email + ' (' + cookies.length + ' cookies)');
+    log('published ' + (live ? 'working' : 'unconfirmed') + ' session for ' + email + ' (' + cookies.length + ' cookies)');
   } catch (e) {
     log('publish failed: ' + (e && e.message));
   }
@@ -406,14 +392,12 @@ async function injectInto(ses, cookies) {
   return ok;
 }
 
-// Whether a slot should take the stored session: it has none, or the stored one comes from a
-// later sign-in than its own. Only ever asked while the slot is at Google sign-in, so an
-// app holding an older session that still works is never touched while in use. The second
-// case is a Workspace account whose policy ended the session: every app still holds an SID,
-// so "already has a session" skipped adoption and each app needed its own sign-in.
+// Whether a slot should take the stored session. Only ever asked while the slot's window is
+// at a sign-in page, which is itself the evidence that the slot's own session (if it has one)
+// no longer works -- so take the stored one unless it is that very same session. The callers'
+// attemptedHash check tries each stored session once per slot, so a dead one cannot loop.
 function wantsStored(local, stored) {
-  if (!sessionHash(local)) return true;
-  return sessionFreshness(stored) > sessionFreshness(local);
+  return sessionHash(local) !== sessionHash(stored);
 }
 
 // Drop the slot's own Google cookies before a newer session goes in, so nothing from the
@@ -435,6 +419,66 @@ function isGoogleAuthUrl(url) {
     const h = new URL(url).hostname.toLowerCase();
     return h === AUTH_LOGIN_HOST || h.endsWith('.' + AUTH_LOGIN_HOST);
   } catch (e) { return false; }
+}
+
+// Any page a window sits on while it is signing in: Google's sign-in, Workspace's
+// (www.google.com/a/<domain>/..., www.google.com/accounts/...), and the account's own identity
+// provider (Okta, Duo, Entra, ... via ctx.isIdpHost). Watching accounts.google.com alone
+// missed every Workspace account with SSO: by the time anyone looks, the window has gone on
+// to spectrocloud.okta.com, so on 11-02 Calendar's fresh work sign-in was published and no
+// other app took it -- each was sitting on Okta, not on Google. Still scoped to sign-in
+// pages, so a window showing its app is never touched.
+function isSignInUrl(url) {
+  if (isGoogleAuthUrl(url)) return true;
+  try {
+    const u = new URL(url);
+    const h = u.hostname.toLowerCase();
+    if (h === 'www.google.com' && /^\/(a|accounts)\//i.test(u.pathname)) return true;
+    return u.protocol === 'https:' && !!ctx.isIdpHost && !!ctx.isIdpHost(h);
+  } catch (e) { return false; }
+}
+
+// Whether a slot's session is shown to work right now: one of its windows is on the app's own
+// Google page (ctx.isAppPage), which a signed-out or ended session never reaches -- Google
+// redirects it to sign-in. Non-Google apps (Tidal, Messenger) are never "live" here: their own
+// pages say nothing about a Google session, so they only ever take, never overwrite.
+function isLive(slot) {
+  if (!ctx.isAppPage) return false;
+  return ctx.windowsForSlot(slot).some((w) => w && !w.isDestroyed() && ctx.isAppPage(w.webContents.getURL()));
+}
+
+// After a slot takes a session, move its window on, to the app's own page. Adoption fires in
+// the middle of a navigation (the redirect to sign-in that revealed the dead session), so the
+// window is first stopped: a load issued into that in-flight redirect lost to it. Measured on
+// 11-02: Keep's work slot adopted the right session at 21:17 and still showed sign-in; a plain
+// restart, same cookies, opened the notes. Reloading the sign-in page was no better -- on a
+// first load nothing is committed yet, and an identity provider's page knows nothing of the
+// Google session. The one case kept on reload is an OAuth request (a non-Google app's "sign in
+// with Google", e.g. Tidal): with a session, Google approves it and returns to that app.
+//
+// And it is checked: if the window lands on a sign-in page again within RESUME_CHECK_MS while
+// the slot still holds the session it just took, it goes home once more.
+const RESUME_CHECK_MS = 30000;
+const resumed = new WeakMap(); // webContents -> { until, retried }
+function resume(wc) {
+  if (wc.isDestroyed()) return;
+  const url = wc.getURL();
+  if (isGoogleAuthUrl(url) && /[?&](client_id|redirect_uri)=/.test(url)) { wc.reload(); return; }
+  if (!ctx.loadHome) { wc.reload(); return; }
+  try { wc.stop(); } catch (e) { /* nothing in flight */ }
+  resumed.set(wc, { until: Date.now() + RESUME_CHECK_MS, retried: false });
+  setTimeout(() => { if (!wc.isDestroyed()) ctx.loadHome(wc); }, 250);
+}
+
+// The check behind resume(): a window that, just after taking a session, finishes on a sign-in
+// page is sent home one more time -- never more, so a session Google really refuses cannot loop.
+function recheckAfterResume(wc, url) {
+  const r = resumed.get(wc);
+  if (!r || r.retried || Date.now() > r.until || !isSignInUrl(url)) return;
+  r.retried = true;
+  log('window still at sign-in after taking a session; opening the app again');
+  try { wc.stop(); } catch (e) { /* nothing in flight */ }
+  setTimeout(() => { if (!wc.isDestroyed()) ctx.loadHome(wc); }, 1000);
 }
 
 // slot -> hash of the session we last injected for it, so a stale/expired session that keeps
@@ -472,8 +516,8 @@ async function adoptForAuth(slot, wc) {
     const ok = await injectInto(ses, data.cookies);
     if (ok && !wc.isDestroyed()) {
       syncedHash.set(email, hash);
-      log('adopted session for ' + email + ' into slot ' + slot + ' (' + ok + ' cookies) at Google sign-in');
-      wc.reload();
+      log('adopted session for ' + email + ' into slot ' + slot + ' (' + ok + ' cookies) at sign-in');
+      resume(wc);
     }
   } finally {
     adopting.delete(slot);
@@ -489,10 +533,11 @@ async function adoptForAuth(slot, wc) {
 // the start meant a signed-out Gmail never adopted, with a valid session sitting in the store.
 function watchAuthNavigation(slot, wc) {
   const check = (url, isInPlace, isMainFrame) => {
-    if (isMainFrame && !isInPlace && isGoogleAuthUrl(url)) adoptForAuth(slot, wc);
+    if (isMainFrame && !isInPlace && isSignInUrl(url)) adoptForAuth(slot, wc);
   };
   wc.on('did-start-navigation', (e, url, isInPlace, isMainFrame) => check(url, isInPlace, isMainFrame));
   wc.on('did-redirect-navigation', (e, url, isInPlace, isMainFrame) => check(url, isInPlace, isMainFrame));
+  wc.on('did-navigate', (e, url) => recheckAfterResume(wc, url));
 }
 
 // A sibling app just published (the store changed). Only windows that are themselves sitting
@@ -510,21 +555,21 @@ function onStoreChanged() {
       const email = ctx.emailForSlot(slot);
       if (!email) continue;
       const wins = ctx.windowsForSlot(slot)
-        .filter((w) => w && !w.isDestroyed() && isGoogleAuthUrl(w.webContents.getURL()));
-      if (!wins.length) continue;                      // no window here is at Google sign-in
+        .filter((w) => w && !w.isDestroyed() && isSignInUrl(w.webContents.getURL()));
+      if (!wins.length) continue;                      // no window here is signing in
       const ses = session.fromPartition('persist:account-' + slot);
       const local = await authCookies(ses);
       const data = await readStored(email);
       if (!data) continue;
       if (!wantsStored(local, data.cookies)) continue; // ours is as recent
       const hash = sessionHash(data.cookies);
-      if (syncedHash.get(email) === hash) continue;    // already have this one
+      if (attemptedHash.get(slot) === hash) continue;  // already tried this one here
       if (sessionHash(local)) await clearAuthCookies(ses, local);
       const injected = await injectInto(ses, data.cookies);
       if (!injected) continue;
       syncedHash.set(email, hash);
       attemptedHash.set(slot, hash);
-      for (const w of wins) w.webContents.reload();
+      for (const w of wins) resume(w.webContents);
       log('propagated session for ' + email + ' to slot ' + slot);
     }
   }, 800);
