@@ -14,6 +14,7 @@ const path = require('path');
 const fs = require('fs');
 
 const sessionSync = require('./session-sync');
+const windowPlace = require('./lib/window-place');
 const { APP_NAME, APP_URL, APP_HOST, APP_ICON, IS_MAC, ACCOUNTS_DIR } = require('./lib/config');
 const { logRecovery } = require('./lib/util');
 const { windows, focusWindow, getAccountsWindow, setAccountsWindow } = require('./lib/window-registry');
@@ -75,6 +76,11 @@ function openAccountWindow(n) {
   // account can adopt it. Idempotent, so calling it every open is fine.
   sessionSync.attachSlot(n);
 
+  // Reopen on the monitor and spot the user left it (see lib/window-place.js); maximized by
+  // default, as before, when there is no saved place or its monitor is not connected.
+  const place = windowPlace.savedPlace(n);
+  const wantMaximized = place.__maximized !== false;
+  delete place.__maximized;
   const win = new BrowserWindow(Object.assign({
     width: 1280,
     height: 860,
@@ -83,7 +89,8 @@ function openAccountWindow(n) {
     title: accountLabel(n) || APP_NAME + ' — Account ' + n,
     backgroundColor: windowBackground(),
     webPreferences: Object.assign({ partition }, STEALTH_WEBPREFS),
-  }, APP_ICON ? { icon: APP_ICON } : {}));
+  }, place, APP_ICON ? { icon: APP_ICON } : {}));
+  windowPlace.track(n, win);
 
   win.webContents.setUserAgent(CHROME_UA);
 
@@ -101,13 +108,13 @@ function openAccountWindow(n) {
     if (win.isDestroyed() || win.isVisible()) return;
     // Maximizing a hidden window is unreliable across Linux WMs, so re-assert it here where
     // the window is about to be mapped.
-    if (!win.isMaximized()) win.maximize();
+    if (wantMaximized && !win.isMaximized()) win.maximize();
     win.show();
   };
   revealTimer = setTimeout(reveal, REVEAL_DEADLINE_MS);
   win.once('ready-to-show', reveal);
 
-  win.maximize();
+  if (wantMaximized) win.maximize();
   windows.set(n, win);
   noteWindowOpened(n);
   // Publish this slot's session once its page is up. The cookie-'changed' listener in
@@ -304,6 +311,12 @@ watchPortalColorScheme();
 app.userAgentFallback = CHROME_UA;
 // Drop the Electron build flag that can taint requests.
 app.commandLine.appendSwitch('disable-blink-features', 'AutomationControlled');
+// X11 (XWayland) on Linux, so a window can reopen where the user left it: under Wayland an
+// app cannot position its own window, and GNOME put every new one on the primary monitor.
+// ELECTRON_APPS_WAYLAND=1 keeps native Wayland for anyone who prefers it over placement.
+if (process.platform === 'linux' && process.env.ELECTRON_APPS_WAYLAND !== '1') {
+  app.commandLine.appendSwitch('ozone-platform', 'x11');
+}
 // Keep EVERY window live — not just the focused one — so background account windows
 // keep refreshing (Calendar data) and keep firing reminders/notifications. Without these,
 // Chromium throttles/suspends background renderers and only the foreground profile updates.
