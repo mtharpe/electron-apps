@@ -460,10 +460,18 @@ function isLive(slot) {
 // the slot still holds the session it just took, it goes home once more.
 const RESUME_CHECK_MS = 30000;
 const resumed = new WeakMap(); // webContents -> { until, retried }
-function resume(wc) {
+function resume(wc, target) {
   if (wc.isDestroyed()) return;
-  const url = wc.getURL();
-  if (isGoogleAuthUrl(url) && /[?&](client_id|redirect_uri)=/.test(url)) { wc.reload(); return; }
+  // Judge by the sign-in page being navigated to (the adoption fires as the window starts
+  // going there); getURL() is still the page it is leaving.
+  const url = target || wc.getURL();
+  if (isGoogleAuthUrl(url) && /[?&](client_id|redirect_uri)=/.test(url)) {
+    // An OAuth request: issue it again now that the session is in, so Google approves it and
+    // returns to the app that asked (Tidal's "sign in with Google").
+    try { wc.stop(); } catch (e) { /* nothing in flight */ }
+    setTimeout(() => { if (!wc.isDestroyed()) wc.loadURL(url).catch(() => {}); }, 250);
+    return;
+  }
   if (!ctx.loadHome) { wc.reload(); return; }
   try { wc.stop(); } catch (e) { /* nothing in flight */ }
   resumed.set(wc, { until: Date.now() + RESUME_CHECK_MS, retried: false });
@@ -475,6 +483,9 @@ function resume(wc) {
 function recheckAfterResume(wc, url) {
   const r = resumed.get(wc);
   if (!r || r.retried || Date.now() > r.until || !isSignInUrl(url)) return;
+  // Google asking this account to verify itself (password, 2FA) is not a failed hand-off: the
+  // user has to answer it, so leave the window there.
+  if (/\/(challenge|signin\/v2\/challenge)\//.test(url)) { resumed.delete(wc); return; }
   r.retried = true;
   log('window still at sign-in after taking a session; opening the app again');
   try { wc.stop(); } catch (e) { /* nothing in flight */ }
@@ -496,7 +507,7 @@ const attemptedHash = new Map();
 // could pass the checks and inject.
 const adopting = new Set();
 
-async function adoptForAuth(slot, wc) {
+async function adoptForAuth(slot, wc, target) {
   if (!enabled || wc.isDestroyed() || adopting.has(slot)) return;
   adopting.add(slot);
   try {
@@ -517,7 +528,7 @@ async function adoptForAuth(slot, wc) {
     if (ok && !wc.isDestroyed()) {
       syncedHash.set(email, hash);
       log('adopted session for ' + email + ' into slot ' + slot + ' (' + ok + ' cookies) at sign-in');
-      resume(wc);
+      resume(wc, target);
     }
   } finally {
     adopting.delete(slot);
@@ -532,8 +543,12 @@ async function adoptForAuth(slot, wc) {
 // load. A redirect fires did-redirect-navigation, never did-start-navigation, so watching only
 // the start meant a signed-out Gmail never adopted, with a valid session sitting in the store.
 function watchAuthNavigation(slot, wc) {
+  // Only on ARRIVING at sign-in -- the window was on the app (or loading it) and is now being
+  // sent to a sign-in page. A navigation from one sign-in page to the next is the user signing
+  // in (password, 2FA, "verify it's you"); swapping a session in there pulled them back to the
+  // app mid-sign-in. Their own sign-in, once it reaches the app, is published and shared.
   const check = (url, isInPlace, isMainFrame) => {
-    if (isMainFrame && !isInPlace && isSignInUrl(url)) adoptForAuth(slot, wc);
+    if (isMainFrame && !isInPlace && isSignInUrl(url) && !isSignInUrl(wc.getURL())) adoptForAuth(slot, wc, url);
   };
   wc.on('did-start-navigation', (e, url, isInPlace, isMainFrame) => check(url, isInPlace, isMainFrame));
   wc.on('did-redirect-navigation', (e, url, isInPlace, isMainFrame) => check(url, isInPlace, isMainFrame));
