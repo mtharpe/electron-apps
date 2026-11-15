@@ -47,6 +47,10 @@ ICONS_DIR="$PREFIX/share/icons/hicolor"
 
 uninstall_one() {
   local slug="$1"
+  # An empty slug turns the removals below into "$PREFIX/lib/", "$PREFIX/bin/" and so on,
+  # i.e. every installed app. Names in services.conf always yield one, but a malformed
+  # argument must fail rather than take the whole install with it.
+  [ -n "$slug" ] || { echo "    refusing to uninstall: empty app slug" >&2; return 1; }
   rm -rf "$PREFIX/lib/$slug"
   rm -f  "$PREFIX/bin/$slug" "$APPS_DIR/$slug.desktop"
   find "$ICONS_DIR" -name "$slug.png" -delete 2>/dev/null || true
@@ -57,7 +61,7 @@ refresh_caches() {
   command -v gtk-update-icon-cache   >/dev/null && gtk-update-icon-cache -qtf "$ICONS_DIR" 2>/dev/null || true
 }
 
-usage() { sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,15p' "$DIR/$(basename "${BASH_SOURCE[0]}")" | sed 's/^# \{0,1\}//'; }
 
 UNINSTALL=0
 WANTED=()
@@ -299,18 +303,24 @@ PY
 }
 
 # Install <src png> as the themed icon <slug>, at every size the desktop looks for.
-# ImageMagick or Pillow does the downscaling; with neither available we fall back to
-# dropping the full-size original into the largest bucket and letting GTK scale it.
+# ImageMagick or Pillow does the downscaling. If ImageMagick is present but cannot convert,
+# fall through to Pillow rather than aborting under `set -e`; with neither, install the
+# source unchanged in scalable/, which does not claim a size the source does not have.
 install_icons() {
   local src="$1" slug="$2" size
   local sizes="16 24 32 48 64 128 256 512"
   if command -v magick >/dev/null 2>&1 || command -v convert >/dev/null 2>&1; then
-    local im; im="$(command -v magick || command -v convert)"
+    local im ok=1
+    im="$(command -v magick || command -v convert)"
     for size in $sizes; do
       mkdir -p "$ICONS_DIR/${size}x${size}/apps"
-      "$im" "$src" -resize "${size}x${size}" "$ICONS_DIR/${size}x${size}/apps/$slug.png"
+      "$im" "$src" -resize "${size}x${size}" \
+        "$ICONS_DIR/${size}x${size}/apps/$slug.png" 2>/dev/null || { ok=0; break; }
     done
-  elif python3 -c 'import PIL' >/dev/null 2>&1; then
+    if [ "$ok" = 1 ]; then return 0; fi
+    echo "    note: ImageMagick could not resize $src — trying Pillow" >&2
+  fi
+  if python3 -c 'import PIL' >/dev/null 2>&1; then
     python3 - "$src" "$ICONS_DIR" "$slug" "$sizes" <<'PY'
 import os, sys
 from PIL import Image
@@ -321,11 +331,14 @@ for s in (int(x) for x in sizes):
     os.makedirs(d, exist_ok=True)
     img.resize((s, s), Image.LANCZOS).save(os.path.join(d, slug + '.png'))
 PY
-  else
-    echo "    note: no ImageMagick/Pillow — installing a single unscaled icon"
-    mkdir -p "$ICONS_DIR/512x512/apps"
-    cp "$src" "$ICONS_DIR/512x512/apps/$slug.png"
+    return 0
   fi
+  # Neither backend: no way to build the size ladder. scalable/ is what the theme scales on
+  # demand; the old fallback copied the full-size source into 512x512/apps, advertising it
+  # as 512x512 when it is some other size.
+  echo "    note: no ImageMagick/Pillow — installing the source icon unscaled (scalable/)"
+  mkdir -p "$ICONS_DIR/scalable/apps"
+  cp "$src" "$ICONS_DIR/scalable/apps/$slug.png"
 }
 
 # Install build deps on first run (electron + packager are devDependencies).
@@ -348,13 +361,26 @@ fi
 # of ELECTRON_CUSTOM_* vars that gets both requests right. Bypass the whole path:
 # fetch the castlabs zip once ourselves, stage it under the plain-version name that
 # packager expects, and pass --electron-zip-dir. That skips @electron/get's download
-# and checksum steps entirely; the resolved tag is the integrity check.
+# and checksum steps, so this script verifies the archive against the checksums the
+# electron package publishes (node_modules/electron/checksums.json) before staging it.
 #
 # Runs AFTER argparse and after the --uninstall exit above, deliberately: --list,
 # --help and --uninstall must not require node or network, and the earlier revision
 # of this block sat at the top of the file where every invocation paid for it
 # whether it needed to build anything or not.
-ELECTRON_VER=$(node -p "require('./package.json').devDependencies.electron.split('#v')[1].split('+')[0]")
+# The Electron pin MUST be the castlabs fork: stock Electron ships no Widevine CDM. A plain
+# registry version here would silently replace it, so fail with a sentence rather than the
+# TypeError a naive split('#v') throws when package.json has any other shape.
+ELECTRON_VER="$(node -e '
+const pin = (require("./package.json").devDependencies || {}).electron || "";
+const m = /^github:castlabs\/electron-releases#v([^+]+)\+wvcus$/.exec(pin);
+if (!m) {
+  console.error("package.json must pin electron to the castlabs fork, e.g. " +
+    "\"electron\": \"github:castlabs/electron-releases#v42.8.0+wvcus\"; found: " + JSON.stringify(pin));
+  process.exit(1);
+}
+process.stdout.write(m[1]);
+')" || { echo "==> Could not read the castlabs Electron pin from package.json." >&2; exit 1; }
 ELECTRON_ZIP_DIR="${ELECTRON_ZIP_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/electron-apps}"
 mkdir -p "$ELECTRON_ZIP_DIR"
 # The cache used to be keyed "linux-google-apps", which was wrong twice over: this project
@@ -378,11 +404,41 @@ fi
 STAGED_ZIP="$ELECTRON_ZIP_DIR/electron-v${ELECTRON_VER}+wvcus-linux-${ARCH}.zip"
 if [ ! -s "$STAGED_ZIP" ]; then
   # ELECTRON_ZIP_URL fully overrides for an internal mirror; ELECTRON_MIRROR still
-  # works as the base if someone had already set it. Neither is required.
-  URL="${ELECTRON_ZIP_URL:-${ELECTRON_MIRROR:-https://github.com/castlabs/electron-releases/releases/download/}v${ELECTRON_VER}+wvcus/electron-v${ELECTRON_VER}+wvcus-linux-${ARCH}.zip}"
+  # works as the base if someone had already set it. Neither is required. A mirror is a
+  # BASE URL, so join it with exactly one slash whether or not it was given one.
+  MIRROR="${ELECTRON_MIRROR:-https://github.com/castlabs/electron-releases/releases/download/}"
+  URL="${ELECTRON_ZIP_URL:-${MIRROR%/}/v${ELECTRON_VER}+wvcus/electron-v${ELECTRON_VER}+wvcus-linux-${ARCH}.zip}"
   echo "==> Downloading Electron $ELECTRON_VER+wvcus (linux-$ARCH)"
-  curl -fSL --retry 3 -o "$STAGED_ZIP.part" "$URL"
-  mv "$STAGED_ZIP.part" "$STAGED_ZIP"
+  part="$(mktemp "$ELECTRON_ZIP_DIR/.dl.XXXXXX")"
+  # The partial download is removed on any exit, including an abort below.
+  trap 'rm -f "$part"' EXIT INT TERM HUP PIPE
+  # --proto '=https' plus --tlsv1.2 keeps a mirror or redirect from silently downgrading
+  # the transport the archive is fetched over.
+  curl -fSL --proto '=https' --tlsv1.2 --retry 3 -o "$part" "$URL"
+  # A truncated download, or an HTML error page saved under a .zip name, must never be
+  # staged as if it were a usable Electron build.
+  unzip -tq "$part" >/dev/null
+  # Bypassing @electron/get also skipped its checksum step. When the installed electron
+  # package publishes castlabs' checksums, require the archive to match the pin. A missing
+  # entry means this platform/arch is not one the pinned release publishes.
+  CHECKSUMS="$DIR/node_modules/electron/checksums.json"
+  if [ -f "$CHECKSUMS" ]; then
+    zip_name="electron-v${ELECTRON_VER}+wvcus-linux-${ARCH}.zip"
+    expected="$(node -e 'const c=require(process.argv[1]); process.stdout.write(c[process.argv[2]] || "")' "$CHECKSUMS" "$zip_name")"
+    if [ -z "$expected" ]; then
+      echo "    no SHA-256 for $zip_name in $CHECKSUMS — this platform/arch may not be published for the pinned Electron" >&2
+      exit 1
+    fi
+    actual="$(node -e 'const c=require("crypto"),f=require("fs"); process.stdout.write(c.createHash("sha256").update(f.readFileSync(process.argv[1])).digest("hex"))' "$part")"
+    if [ "$actual" != "$expected" ]; then
+      echo "    SHA-256 mismatch for $URL" >&2
+      echo "      expected $expected" >&2
+      echo "      got      $actual" >&2
+      exit 1
+    fi
+  fi
+  mv "$part" "$STAGED_ZIP"
+  trap - EXIT INT TERM HUP PIPE
 fi
 
 # Each app needs its OWN X11 WM_CLASS / Wayland app_id, or the desktop treats all four as
@@ -394,12 +450,19 @@ fi
 # including Ctrl-C, so an interrupted build never leaves package.json rewritten.
 PKG_BACKUP="$(mktemp)"
 cp package.json "$PKG_BACKUP"
-restore_pkg() { [ -f "$PKG_BACKUP" ] && cp "$PKG_BACKUP" package.json && rm -f "$PKG_BACKUP"; }
+# One EXIT handler for both kinds of damage a failed run leaves behind: a package.json with
+# a per-service productName baked in, and a half-written build/ or app-config.json. Folding
+# the scratch cleanup in here is what makes an aborted `set -e` run clean up after itself;
+# previously those were only removed on the success path.
+cleanup() {
+  rm -rf "$DIR/build" "$DIR/app-config.json"
+  if [ -f "$PKG_BACKUP" ]; then cp "$PKG_BACKUP" package.json; rm -f "$PKG_BACKUP"; fi
+}
 # HUP/PIPE matter as much as INT/TERM here: piping this script's output to something that
 # exits early (`./build-linux.sh | head`) kills it with SIGPIPE, and an untrapped fatal
 # signal skips the EXIT trap entirely — which would strand a half-built productName in the
 # working tree. Learned by doing exactly that.
-trap restore_pkg EXIT INT TERM HUP PIPE
+trap cleanup EXIT INT TERM HUP PIPE
 
 set_product_name() {
   python3 - "$1" <<'PY'
@@ -429,10 +492,21 @@ for entry in "${SELECTED[@]}"; do
   echo "==> Building $name"
 
   png="$DIR/icons/png/$icon.png"
-  if [ ! -f "$png" ]; then
-    [ -f "$DIR/icons/$icon.icns" ] || { echo "    missing icons/$icon.icns and icons/png/$icon.png"; exit 1; }
-    echo "    extracting icons/png/$icon.png from $icon.icns"
-    extract_icns_png "$DIR/icons/$icon.icns" "$png"
+  icns="$DIR/icons/$icon.icns"
+  # The PNG is committed for Linux, but the .icns is the source of truth. Re-extract when
+  # the .icns is newer, so updating the artwork cannot keep shipping the old committed PNG.
+  if [ ! -f "$png" ] || { [ -f "$icns" ] && [ "$icns" -nt "$png" ]; }; then
+    [ -f "$icns" ] || { echo "    missing icons/$icon.icns and icons/png/$icon.png"; exit 1; }
+    echo "    extracting icons/png/$icon.png from $icns"
+    # Extract to a temporary file and copy only on a real difference: re-extracting an
+    # unchanged icon should not leave a spurious working-tree change after every build.
+    tmp_png="$(mktemp "$DIR/icons/png/.$icon.XXXXXX")"
+    extract_icns_png "$icns" "$tmp_png"
+    if [ -f "$png" ] && cmp -s "$tmp_png" "$png"; then
+      rm -f "$tmp_png"
+    else
+      mv "$tmp_png" "$png"
+    fi
   fi
 
   # slug travels into the app so main.js can find styles/<slug>.css without re-deriving it.
@@ -453,7 +527,6 @@ for entry in "${SELECTED[@]}"; do
     --out="$DIR/build" --overwrite >/dev/null
 
   staged="$DIR/build/$name-linux-$ARCH"
-  uninstall_one "$slug"
   install_icons "$png" "$slug"
 
   # main.js picks this up for window/taskbar icons and notification banners — a Linux
@@ -490,27 +563,52 @@ for entry in "${SELECTED[@]}"; do
     cp "$png" "$staged/resources/app-icon.png"
   fi
 
-  mkdir -p "$PREFIX/lib/$slug"
-  cp -R "$staged/." "$PREFIX/lib/$slug/"
+  # Install by swap: copy the new build beside the old one first, then move the old one
+  # aside only once the copy has succeeded. Removing the old install up front (what
+  # uninstall_one used to do here) loses the app entirely if the copy then fails.
+  stage_dir="$PREFIX/lib/.$slug.new"
+  old_dir="$PREFIX/lib/.$slug.old"
+  rm -rf "$stage_dir"
+  cp -R "$staged" "$stage_dir"
+  # Only now is it safe to drop any backup left by an earlier interrupted run.
+  rm -rf "$old_dir"
+  if [ -e "$PREFIX/lib/$slug" ]; then mv "$PREFIX/lib/$slug" "$old_dir"; fi
+  mv "$stage_dir" "$PREFIX/lib/$slug"
+  rm -rf "$old_dir"
   ln -sfn "$PREFIX/lib/$slug/$slug" "$PREFIX/bin/$slug"
 
   # StartupNotify=false: Electron never completes a launch's startup sequence. On Wayland the
   # shell hands it XDG_ACTIVATION_TOKEN and Electron ignores it (also as --xdg-activation-token),
   # minting a token of its own for the first window instead — measured with WAYLAND_DEBUG=1.
   # GNOME then shows a busy cursor for the whole startup timeout, or until focus moves.
-  cat > "$APPS_DIR/$slug.desktop" <<EOF
-[Desktop Entry]
-Type=Application
-Version=1.1
-Name=$name
-Comment=$name as a standalone app
-Exec=$PREFIX/lib/$slug/$slug %U
-Icon=$slug
-Terminal=false
-Categories=$categories
-StartupNotify=false
-StartupWMClass=$slug
-EOF
+  # A newline cannot exist in a desktop entry (it ends the line), and '%' starts a field
+  # code in Exec. Reject either in the values interpolated below rather than write a broken
+  # file that the desktop silently ignores.
+  for _v in "$PREFIX" "$name"; do
+    case "$_v" in
+      *$'\n'*) echo "    PREFIX or app name contains a newline, which a .desktop entry cannot represent" >&2; exit 1 ;;
+      *%*)     echo "    PREFIX or app name contains '%', which Exec reserves for field codes" >&2; exit 1 ;;
+    esac
+  done
+  unset _v
+  # The spec's Exec quoting: wrap the argument in double quotes and precede each '"', '`',
+  # '$' and '\' with an extra backslash. Written with printf, not a heredoc, so those
+  # backslashes survive instead of being consumed as heredoc escapes.
+  exec_path="$PREFIX/lib/$slug/$slug"
+  exec_q="\"$(printf '%s' "$exec_path" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/`/\\`/g' -e 's/\$/\\$/g')\""
+  {
+    printf '[Desktop Entry]\n'
+    printf 'Type=Application\n'
+    printf 'Version=1.1\n'
+    printf 'Name=%s\n' "$name"
+    printf 'Comment=%s as a standalone app\n' "$name"
+    printf 'Exec=%s %%U\n' "$exec_q"
+    printf 'Icon=%s\n' "$slug"
+    printf 'Terminal=false\n'
+    printf 'Categories=%s\n' "$categories"
+    printf 'StartupNotify=false\n'
+    printf 'StartupWMClass=%s\n' "$slug"
+  } > "$APPS_DIR/$slug.desktop"
   # Declaring a scheme makes the app a CANDIDATE handler; it does not make it the default.
   # That stays the user's choice: gio mime x-scheme-handler/mailto gmail.desktop
   mimes="$(printf '%s' "${handlers:-}" | tr ',' '\n' \
@@ -520,8 +618,7 @@ EOF
   echo "    installed: $PREFIX/lib/$slug  (launch: $slug)"
 done
 
-rm -rf build app-config.json
-restore_pkg
+cleanup
 trap - EXIT INT TERM HUP PIPE
 refresh_caches
 

@@ -1,0 +1,4 @@
+{
+  "description": "Test-only directory. The main field lets `node --test test/` resolve the directory to the test file on Node versions that do not recurse a positional directory.",
+  "main": "util.test.js"
+}

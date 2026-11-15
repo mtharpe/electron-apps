@@ -126,8 +126,11 @@ ensure_prereqs() {
   else
     local go="${INSTALL_PREREQS:-}"
     if [ -z "$go" ] && [ -t 0 ]; then
+      local reply
       printf "    Install them now with %s:%s ? [Y/n] " "$pm" "$pkgs"
-      read -r reply
+      # `read` returns non-zero at EOF; under `set -e` that would abort the whole build
+      # before the user ever saw the prompt's default. An empty answer means yes.
+      read -r reply || reply=''
       case "$reply" in [nN]*) go=0 ;; *) go=1 ;; esac
     fi
     if [ "$go" = 1 ]; then
@@ -141,4 +144,16 @@ ensure_prereqs() {
   for t in $required; do
     command -v "$t" >/dev/null 2>&1 || { echo "==> Cannot build without $t." >&2; exit 1; }
   done
+
+  # A node installed just now may still be older than the build needs, and a distro package
+  # can shadow a newer one on PATH. The check earlier only ran when node already existed, so
+  # repeat it here and say clearly what is wrong rather than failing later inside packager.
+  if command -v node >/dev/null 2>&1; then
+    local have; have="$(node -p 'process.versions.node' 2>/dev/null || echo 0)"
+    if ! prereq_version_ge "$have" "$PREREQ_REQUIRED_NODE"; then
+      echo "==> node $have is older than the $PREREQ_REQUIRED_NODE the build needs." \
+           "Install a current Node (https://nodejs.org or nvm) and re-run." >&2
+      exit 1
+    fi
+  fi
 }

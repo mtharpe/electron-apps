@@ -25,7 +25,7 @@
 # that hint to decide which app a notification belongs to (its icon, and its entry in the
 # notification settings). Rename the file without renaming the slug and notifications
 # quietly lose their identity.
-slugify() { echo "$1" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-*//; s/-*$//'; }
+slugify() { printf '%s\n' "$1" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-*//; s/-*$//'; }
 
 _lower() { echo "$1" | tr '[:upper:]' '[:lower:]'; }
 
@@ -88,7 +88,7 @@ _interactive_select() {
     i=$((i + 1))
   done
   echo >&2
-  printf 'Numbers ("1 3"), names ("gmail keep"), or press Enter for all: ' >&2
+  printf 'Numbers ("1,3"), names ("gmail, keep"), or press Enter for all: ' >&2
   read -r reply || reply=""
   echo >&2
 
@@ -97,11 +97,21 @@ _interactive_select() {
     ''|all) SELECTED=("${SERVICES[@]}"); return 0 ;;
   esac
 
-  # Commas are what people type even when told to use spaces.
-  for token in $(echo "$reply" | tr ',' ' '); do
+  # Split on commas only, and read a whole line at a time. Word-splitting the reply (the
+  # old `for token in $(...)`) broke a display name with a space ("Google Calendar") into
+  # pieces and let a glob like "*" expand against the working directory. One line per comma
+  # keeps each token intact, and every use below is quoted.
+  while IFS= read -r token; do
+    # Trim the spaces people leave around commas, so "gmail, keep" works.
+    token="${token#"${token%%[![:space:]]*}"}"
+    token="${token%"${token##*[![:space:]]}"}"
+    [ -n "$token" ] || continue
     case "$token" in
-      ''|*[!0-9]*) _select_one "$token" || return 1 ;;
+      *[!0-9]*) _select_one "$token" || return 1 ;;
       *)
+        # 10# forces base 10: bash reads a leading zero as octal, so "08" would otherwise
+        # be an invalid octal number instead of app 8.
+        token=$((10#${token}))
         if [ "$token" -lt 1 ] || [ "$token" -gt "$total" ]; then
           echo "No app number $token — pick between 1 and $total." >&2
           return 1
@@ -109,7 +119,7 @@ _interactive_select() {
         _select_one "$(_entry_name "${SERVICES[$((token - 1))]}")" || return 1
         ;;
     esac
-  done
+  done <<< "$(printf '%s' "$reply" | tr ',' '\n')"
 }
 
 # Resolve the user's arguments into SELECTED.
@@ -160,6 +170,10 @@ PACKAGER_IGNORES=(
   "^/docs($|/)"
   "^/services\.conf$"
   "^/\.remember($|/)"
+  "^/\.claude($|/)"
+  "^/CLAUDE-SECURITY-[^/]*($|/)"
+  "^/\.superpowers($|/)"
+  "^/test($|/)"
   "^/\.gitignore$"
   "^/node_modules/\.package-lock\.json$"   # npm's prune leftover, ~24 KB, unread at runtime
 )
