@@ -3,11 +3,12 @@
 // Runs in the page's main world (contextIsolation:false) BEFORE the page's own scripts.
 (function () {
   'use strict';
-  // Derive from the REAL bundled Chromium (via Node's process, available in this
-  // non-sandboxed preload) so the spoofed version can never lag the engine — a stale major
+  // Derive from the REAL bundled Chromium (via the sandboxed preload's `process`, which still
+  // exposes `versions`) so the spoofed version can never lag the engine — a stale major
   // makes Google reject the app (Calendar shows "could not load the data"). Read here,
   // before the Node-global scrub in step 4 below.
-  const V = (((typeof process !== 'undefined') && process.versions && process.versions.chrome) || '148.0.0.0').split('.')[0];
+  const CHROME_FULL = ((typeof process !== 'undefined') && process.versions && process.versions.chrome) || '148.0.0.0';
+  const V = CHROME_FULL.split('.')[0];
 
   // Spoof the HOST platform. These values must agree with the User-Agent and
   // Sec-CH-UA-Platform headers main.js sends — a client claiming macOS in JS while its
@@ -42,7 +43,11 @@
       { brand: 'Chromium', version: V },
       { brand: 'Not.A/Brand', version: '24' },
     ];
-    const fullVersionList = brands.map((b) => ({ brand: b.brand, version: b.version + '.0.0.0' }));
+    // The reduced `brands` versions are major-only, as Chrome sends them; the high-entropy
+    // fields carry the engine's real version, which real Chrome does too. A `<major>.0.0.0`
+    // stand-in here is exactly the kind of impossible-chrome tell the stealth layer exists
+    // to avoid.
+    const fullVersionList = brands.map((b) => ({ brand: b.brand, version: CHROME_FULL }));
     const uaData = {
       brands,
       mobile: false,
@@ -56,7 +61,7 @@
         model: '',
         platform: CH_PLATFORM,
         platformVersion: CH_PLATFORM_VERSION,
-        uaFullVersion: V + '.0.0.0',
+        uaFullVersion: CHROME_FULL,
         wow64: false,
       }),
       toJSON: () => ({ brands, mobile: false, platform: CH_PLATFORM }),
@@ -78,15 +83,14 @@
     window.chrome.loadTimes = window.chrome.loadTimes || function () { return {}; };
   } catch (e) {}
 
-  // 4) Scrub Electron/Node globals that fingerprinting scripts probe for.
-  try {
-    delete window.require;
-    delete window.exports;
-    delete window.module;
-    delete window.process;
-    delete window.global;
-    delete window.Buffer;
-  } catch (e) {}
+  // 4) Scrub Electron/Node globals that fingerprinting scripts probe for. One global per
+  //    attempt: a single try around the whole list meant a non-configurable property, or a
+  //    strict-mode `delete` that throws, skipped every later name and left `global`/`Buffer`
+  //    exposed. Reflect.deleteProperty reports failure instead of throwing, and each name is
+  //    still guarded in case the window itself rejects the operation.
+  for (const name of ['require', 'exports', 'module', 'process', 'global', 'Buffer']) {
+    try { Reflect.deleteProperty(window, name); } catch (e) {}
+  }
 
   // 5) navigator.plugins needs no patch here. There used to be one, guarded on
   //    `navigator.plugins.length === 0` on the theory that an embedded Chromium reports an
@@ -155,21 +159,39 @@
     //     Held until closed: Google Messages keeps no reference to its notifications, and a
     //     click on one opened from the tray minutes later did nothing at all (measured: GNOME
     //     sent ActionInvoked, the app logged no click). Same failure as the main-process
-    //     `live` set in lib/notifications.js guards against.
+    //     `live` set in lib/notifications.js guards against. Bounded, though: the desktop does
+    //     not always report close/error, and a page that never tears its notifications down
+    //     would otherwise leave every one of them in this set for the renderer's lifetime.
+    //     Set iteration is insertion order, so the oldest entry is evicted first.
+    const SHOWN_MAX = 50;
     const shown = new Set();
+    // Set for a moment when a banner we saw is clicked, so the page's own click handler can
+    // bring its window back by calling window.focus() (7c). Deliberately short-lived and
+    // consumed on use: a page calling window.focus() at any other time must not raise the
+    // OS window, which is what made the old `!document.hasFocus()` gate a focus-steal.
+    const CLICK_GRACE_MS = 2000;
+    let clickUntil = 0;
     if (window.Notification) {
       window.Notification = new Proxy(window.Notification, {
-        construct(target, argList) {
+        construct(target, argList, newTarget) {
           if (IS_MAC) { try { fire(argList[0], argList[1]); } catch (e) {} }
-          const notif = Reflect.construct(target, argList, target);
+          // `newTarget` preserves a subclass's prototype, so `x instanceof SubNotification`
+          // still holds. Without it every construction was forced onto Notification itself.
+          const notif = Reflect.construct(target, argList, newTarget || target);
           if (!IS_MAC && ipc) {
             try {
               shown.add(notif);
+              while (shown.size > SHOWN_MAX) {
+                const oldest = shown.values().next().value;
+                if (oldest === undefined) break;
+                shown.delete(oldest);
+              }
               const release = () => shown.delete(notif);
               notif.addEventListener('close', release);
               notif.addEventListener('error', release);
               notif.addEventListener('click', () => {
                 release();
+                clickUntil = Date.now() + CLICK_GRACE_MS;
                 try { ipc.send('notification-focus', 'page'); } catch (e) {}
               });
               ipc.send('notification-posted');
@@ -182,14 +204,17 @@
 
     // 7c) Linux: a page asks for its window back by calling window.focus() from its own
     //     notification click handler. That call cannot raise the OS window from a renderer,
-    //     so forward it. Covers notifications the 7a hook never saw — a Google Messages
-    //     click left the conversation open in a window that stayed behind. Only honoured
-    //     with a click's activation token, so a page focusing itself at any other time
-    //     changes nothing. A Proxy, like 7a, so the function still reads as native.
+    //     so forward it -- but ONLY while a click we just observed is still fresh. The old
+    //     `!document.hasFocus()` test let any backgrounded page raise the window whenever it
+    //     focused itself; the click flag ties the raise to an actual banner click. A Proxy,
+    //     like 7a, so the function still reads as native.
     if (!IS_MAC && ipc && typeof window.focus === 'function') {
       window.focus = new Proxy(window.focus, {
         apply(target, thisArg, args) {
-          try { if (!document.hasFocus()) ipc.send('notification-focus', 'window.focus'); } catch (e) {}
+          if (Date.now() < clickUntil) {
+            clickUntil = 0; // one click raises once, however many focus() calls follow
+            try { ipc.send('notification-focus', 'window.focus'); } catch (e) {}
+          }
           return Reflect.apply(target, thisArg, args);
         },
       });
