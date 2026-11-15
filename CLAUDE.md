@@ -30,7 +30,7 @@ desktop app, is what most of `lib/` and `preload.js` are for.
 | `prereqs.sh` | `ensure_prereqs`: checks node/npm/curl/python3 (required) and rsvg-convert + a keyring client (optional), and offers to install what is missing via the system package manager — asks first; `INSTALL_PREREQS=1`/`0` to decide in scripts. Image-based hosts get the command instead. Shared by both installers. |
 | `build-linux.sh` | Linux: package, install under `$PREFIX`, write `.desktop` + icon ladder, resolve the icon theme. |
 | `build.sh` | macOS: package, install to `~/Applications`, ad-hoc codesign. Dispatches to `build-linux.sh` on Linux. |
-| `main.js` | Entry point only: creates the windows, wires the modules together, owns the app lifecycle. ~320 lines. |
+| `main.js` | Entry point only: creates the windows, wires the modules together, owns the app lifecycle. ~393 lines. |
 | `lib/config.js` | This app's identity, read from `app-config.json`. `ROOT` is here — modules under `lib/` must resolve bundled files against it, not `__dirname`. |
 | `lib/util.js` | `wait`, `logRecovery`, `hasSuffix`, `pathUnder`. Depends on nothing. |
 | `lib/window-registry.js` | Owns the slot→window map and the Accounts window. Depends on nothing — that is the point; it is what keeps theme/accounts/recovery from requiring each other. |
@@ -39,6 +39,7 @@ desktop app, is what most of `lib/` and `preload.js` are for.
 | `lib/accounts.js` | Account slots: `accounts.json`, Chrome's profile list, labels, slot identity. The data layer — knows nothing about menus or windows. |
 | `lib/routing.js` | Whether a URL loads in-app or goes to the real browser, and how it gets there. Out-of-scope pages on a path-scoped app's own domain open in an in-app viewer window. |
 | `lib/handoff.js` | A link headed for the browser that another installed app claims opens in that app instead. Each app registers its claim in `<appData>/electron-apps/apps/<slug>.json` at startup. |
+| `lib/handlers.js` | Link schemes the app takes over, from `services.conf`'s `handlers` field (`mailto:` for Gmail). Resolves a scheme to an in-app URL; `openHandled`/`openWindow` open it, through an opener `main.js` registers so `routing.js` can use it without requiring `main.js`. |
 | `lib/notifications.js` | Native notifications and the web-notification mirror. |
 | `lib/recovery.js` | Retry after a failed navigation; reload after the machine wakes. |
 | `lib/window-restore.js` | Which account windows open at launch: "Open at launch" slots plus, while Reopen is on, the last session's. Per app, in `<userData>/restore.json` — not the shared `accounts.json`. |
@@ -544,9 +545,11 @@ ICON_THEME=Papirus-Dark ./build-linux.sh
 Installs entirely under `$PREFIX` (default `~/.local`) — no root, nothing system-wide.
 `--uninstall` deliberately leaves signed-in sessions in `~/.config/<App Name>/` alone.
 
-The build rewrites `package.json`'s `productName` per service and restores it on exit,
+The Linux build rewrites `package.json`'s `productName` per service and restores it on exit,
 trapping `INT TERM HUP PIPE` as well as `EXIT` — piping the build into something that exits
-early would otherwise strand a half-built `productName` in the working tree.
+early would otherwise strand a half-built `productName` in the working tree. `build.sh` does
+not: macOS takes the name from packager's appname argument and `app.setName()`, so
+`productName` is neither read nor rewritten there.
 
 Scripts must stay **bash 3.2 compatible** (macOS still ships it): no associative arrays, no
 `mapfile`, no bare expansion of a possibly-empty array under `set -u` — use
