@@ -32,11 +32,12 @@ const accountsModule = require('./lib/accounts');
 const { attachExternalLinkRouting, isFirstPartyHost, isFirstPartyUrl, inAppUrl } = require('./lib/routing');
 const handlers = require('./lib/handlers');
 const handoff = require('./lib/handoff');
-const { nativeNotification } = require('./lib/notifications');
+const { showNotificationFor } = require('./lib/notifications');
 const { attachLoadRecovery, recoverAfterResume } = require('./lib/recovery');
 const {
   loadRestoreState, takeLaunchSlots, noteWindowOpened, noteWindowClosed,
   getReopenAccounts, setReopenAccounts, getLaunchSlots, setLaunchSlots,
+  getWindowGeometry, noteWindowGeometry,
 } = require('./lib/window-restore');
 const {
   loadCustomCss, applyCustomStyles, manageWindowTitle, attachContextMenu,
@@ -61,9 +62,15 @@ function openAccountWindow(n) {
   if (!Number.isInteger(n) || n < 1 || n > WINDOW_SLOTS) n = 1;
   const existing = windows.get(n);
   if (existing && !existing.isDestroyed()) {
-    existing.focus();
+    focusWindow(existing);
     return existing;
   }
+
+  // Where this slot's window sat last time, if it has ever been opened. Absent on a first
+  // run, which keeps the old behaviour of opening maximized.
+  const geometry = getWindowGeometry(n);
+  const bounds = geometry && geometry.bounds;
+  const startMaximized = geometry ? geometry.maximized !== false : true;
 
   const partition = 'persist:account-' + n; // isolated, persistent cookie jar per account
   const sess = session.fromPartition(partition);
@@ -75,15 +82,17 @@ function openAccountWindow(n) {
   // account can adopt it. Idempotent, so calling it every open is fine.
   sessionSync.attachSlot(n);
 
-  const win = new BrowserWindow(Object.assign({
-    width: 1280,
-    height: 860,
+  const winOptions = {
+    width: bounds ? bounds.width : 1280,
+    height: bounds ? bounds.height : 860,
     // Held back until the renderer has a first frame — see reveal() below.
     show: false,
     title: accountLabel(n) || APP_NAME + ' — Account ' + n,
     backgroundColor: windowBackground(),
     webPreferences: Object.assign({ partition }, STEALTH_WEBPREFS),
-  }, APP_ICON ? { icon: APP_ICON } : {}));
+  };
+  if (bounds) { winOptions.x = bounds.x; winOptions.y = bounds.y; }
+  const win = new BrowserWindow(Object.assign(winOptions, APP_ICON ? { icon: APP_ICON } : {}));
 
   win.webContents.setUserAgent(CHROME_UA);
 
@@ -100,14 +109,22 @@ function openAccountWindow(n) {
     if (revealTimer) { clearTimeout(revealTimer); revealTimer = null; }
     if (win.isDestroyed() || win.isVisible()) return;
     // Maximizing a hidden window is unreliable across Linux WMs, so re-assert it here where
-    // the window is about to be mapped.
-    if (!win.isMaximized()) win.maximize();
+    // the window is about to be mapped. A window that was NOT maximized gets its saved
+    // bounds back at the same point, so the un-maximized size is what first paints.
+    if (startMaximized) {
+      if (!win.isMaximized()) win.maximize();
+    } else if (bounds) {
+      win.setBounds(bounds);
+    }
     win.show();
+    // Zoom is per webContents and there is no page to zoom until the window exists, so apply
+    // the saved factor after the reveal rather than at construction.
+    if (geometry && typeof geometry.zoom === 'number') win.webContents.setZoomFactor(geometry.zoom);
   };
   revealTimer = setTimeout(reveal, REVEAL_DEADLINE_MS);
   win.once('ready-to-show', reveal);
 
-  win.maximize();
+  if (startMaximized) win.maximize();
   windows.set(n, win);
   noteWindowOpened(n);
   // Publish this slot's session once its page is up. The cookie-'changed' listener in
@@ -122,7 +139,26 @@ function openAccountWindow(n) {
   // jar. The trade for that scoping: a signed-out Google app flashes its login redirect once
   // before the session is adopted and it reloads, rather than painting pre-authenticated.
   sessionSync.watchAuthNavigation(n, win.webContents);
-  win.loadURL(APP_URL, { userAgent: CHROME_UA });
+  win.loadURL(APP_URL, { userAgent: CHROME_UA })
+    .catch((e) => logRecovery('account ' + n + ' load failed: ' + (e && e.message)));
+  // Persist where the window sat and how far it was zoomed, so the next launch puts it back.
+  const captureGeometry = () => {
+    if (win.isDestroyed()) return;
+    // getNormalBounds() is the un-maximized rectangle — a maximized window's getBounds()
+    // would restore to a maximized-sized window when maximize is turned off again.
+    const normal = win.getNormalBounds();
+    noteWindowGeometry(n, {
+      maximized: win.isMaximized(),
+      bounds: { x: normal.x, y: normal.y, width: normal.width, height: normal.height },
+      zoom: win.webContents && !win.webContents.isDestroyed() ? win.webContents.getZoomFactor() : 1,
+    });
+  };
+  win.on('close', captureGeometry);
+  win.webContents.on('zoom-changed', () => {
+    // zoom-changed reports the request, not the settled factor, so read it a beat later;
+    // window-restore.js coalesces the writes, so a scroll burst costs one write.
+    setTimeout(captureGeometry, 100);
+  });
   win.on('closed', () => {
     if (revealTimer) { clearTimeout(revealTimer); revealTimer = null; }
     windows.delete(n);
@@ -157,7 +193,8 @@ function openHandledWindow(n, url) {
   const revealTimer = setTimeout(reveal, REVEAL_DEADLINE_MS);
   win.once('ready-to-show', reveal);
   win.on('closed', () => clearTimeout(revealTimer));
-  win.loadURL(url, { userAgent: CHROME_UA });
+  win.loadURL(url, { userAgent: CHROME_UA })
+    .catch((e) => logRecovery('handled window load failed: ' + (e && e.message)));
   return win;
 }
 handlers.setOpener(openHandledWindow);
@@ -167,11 +204,14 @@ handlers.setOpener(openHandledWindow);
 function openHandedLink(link) {
   const url = inAppUrl(link);
   const win = windows.get(1);
-  if (!win || win.isDestroyed()) { openAccountWindow(1).loadURL(url, { userAgent: CHROME_UA }); return; }
-  win.loadURL(url, { userAgent: CHROME_UA });
-  if (win.isMinimized()) win.restore();
-  win.show();
-  win.focus();
+  if (!win || win.isDestroyed()) {
+    openAccountWindow(1).loadURL(url, { userAgent: CHROME_UA })
+      .catch((e) => logRecovery('handed link load failed: ' + (e && e.message)));
+    return;
+  }
+  win.loadURL(url, { userAgent: CHROME_UA })
+    .catch((e) => logRecovery('handed link load failed: ' + (e && e.message)));
+  focusWindow(win);
 }
 
 // ACCOUNT_SLOTS is the bound, not an arbitrary ceiling: this used to scan to 50, which meant
@@ -192,9 +232,12 @@ function nextFreeSlot() {
 }
 
 function openAccountsWindow() {
+  // Re-read before the window renders: another app may have renamed a slot since this one
+  // last loaded, and the window's rows are a snapshot taken at accounts:load.
+  loadAccounts();
   const open = getAccountsWindow();
   if (open && !open.isDestroyed()) {
-    open.focus();
+    focusWindow(open);
     return open;
   }
   const accountsWindow = new BrowserWindow(Object.assign({
@@ -213,121 +256,174 @@ function openAccountsWindow() {
   }, APP_ICON ? { icon: APP_ICON } : {}));
   setAccountsWindow(accountsWindow);
   accountsWindow.setMenuBarVisibility(false);
-  accountsWindow.loadFile(path.join(__dirname, 'accounts.html'));
+  accountsWindow.loadFile(path.join(__dirname, 'accounts.html'))
+    .catch((e) => logRecovery('accounts window load failed: ' + (e && e.message)));
   accountsWindow.on('closed', () => setAccountsWindow(null));
   return accountsWindow;
 }
 
-ipcMain.handle('accounts:load', () => ({
-  reopenAccounts: getReopenAccounts(),
-  single: WINDOW_SLOTS === 1,
-  slots: Array.from({ length: WINDOW_SLOTS }, (unused, i) => {
-    const n = i + 1;
-    const cfg = accountConfig(n);
-    const resolved = profileForSlot(n);
-    return {
-      n,
-      name: cfg.name || '',
-      chromeProfile: cfg.chromeProfile || PROFILE_AUTO,
-      email: cfg.email || '',
-      resolvedProfile: resolved ? resolved.name : '',
-      openAtLaunch: getLaunchSlots().includes(n),
-    };
-  }),
-  profiles: chromeProfiles(),
-}));
+// These three are reachable from any renderer, so they are gated on being the Accounts window
+// itself. The page is our own, but the channels are global: without the check a Google page
+// (or an SSO popup) could rewrite the account names and routing of every slot.
+function fromAccountsWindow(event) {
+  return BrowserWindow.fromWebContents(event.sender) === getAccountsWindow();
+}
+
+ipcMain.handle('accounts:load', (event) => {
+  if (!fromAccountsWindow(event)) throw new Error('accounts:load is only available from the Accounts window');
+  return {
+    reopenAccounts: getReopenAccounts(),
+    single: WINDOW_SLOTS === 1,
+    slots: Array.from({ length: WINDOW_SLOTS }, (unused, i) => {
+      const n = i + 1;
+      const cfg = accountConfig(n);
+      const resolved = profileForSlot(n);
+      return {
+        n,
+        name: cfg.name || '',
+        chromeProfile: cfg.chromeProfile || PROFILE_AUTO,
+        email: cfg.email || '',
+        resolvedProfile: resolved ? resolved.name : '',
+        openAtLaunch: getLaunchSlots().includes(n),
+      };
+    }),
+    profiles: chromeProfiles(),
+  };
+});
 
 ipcMain.handle('accounts:save', (event, incoming, launch) => {
+  if (!fromAccountsWindow(event)) throw new Error('accounts:save is only available from the Accounts window');
   if (!Array.isArray(incoming)) return false;
   // Validate rather than trust: an ipcMain handler is reachable from any renderer, and a
   // profile directory that Chrome doesn't have would send links into a profile it invents.
-  const known = new Set(chromeProfiles().map((p) => p.dir));
+  const profiles = chromeProfiles();
+  const known = new Set(profiles.map((p) => p.dir));
   const touched = [];
   for (const row of incoming) {
     const n = Number(row && row.n);
     if (!Number.isInteger(n) || n < 1 || n > WINDOW_SLOTS) continue;
-    touched.push(n);
-    let profile = typeof row.chromeProfile === 'string' ? row.chromeProfile : PROFILE_AUTO;
-    if (profile !== PROFILE_AUTO && profile !== PROFILE_NONE && !known.has(profile)) profile = PROFILE_AUTO;
+    const current = accountConfig(n);
+    const requested = typeof row.chromeProfile === 'string' ? row.chromeProfile : PROFILE_AUTO;
+    let profile;
+    if (profiles.length === 0) {
+      // The window had no profiles to offer, and accounts.html initialises its select from
+      // the saved value — with no matching option it lands on "" and falls back to Auto. So
+      // an Auto here means "the list was empty", not a decision to drop the pin: preserve it.
+      // An explicit None is still a real choice (and routes the same way while the list is
+      // empty, so honouring it costs nothing).
+      profile = requested === PROFILE_NONE ? PROFILE_NONE : (current.chromeProfile || PROFILE_AUTO);
+    } else {
+      profile = requested;
+      // Validate rather than trust: a profile directory Chrome no longer has would send
+      // links into a profile it invents, so fall back to auto.
+      if (profile !== PROFILE_AUTO && profile !== PROFILE_NONE && !known.has(profile)) profile = PROFILE_AUTO;
+    }
     const name = typeof row.name === 'string' ? row.name.trim().slice(0, 64) : '';
     // The detected address is ours, not the renderer's — keep whatever we already learned.
-    accounts.set(n, Object.assign(accountConfig(n), { name, chromeProfile: profile }));
+    // Skip a row the user did not edit in THIS window. Compare against the snapshot the
+    // window was rendered with (sent as origName/origProfile): comparing against the live
+    // in-memory value would treat a sibling's newer on-disk change as "different" and write
+    // this window's stale copy back over it. Fall back to the memory comparison if the
+    // renderer did not send a snapshot.
+    const origName = typeof row.origName === 'string' ? row.origName : null;
+    const origProfile = typeof row.origProfile === 'string' ? row.origProfile : null;
+    const untouched = origName !== null && origProfile !== null
+      && row.name === origName && row.chromeProfile === origProfile;
+    if (untouched) continue;
+    if (name === (current.name || '') && profile === (current.chromeProfile || PROFILE_AUTO)) continue;
+    accounts.set(n, Object.assign({}, current, { name, chromeProfile: profile }));
+    touched.push(n);
   }
-  persistSlots(touched);
+  if (touched.length > 0) persistSlots(touched);
   // Startup choices are this app's own (window-restore.js), not the shared accounts.json.
   if (launch && typeof launch === 'object') {
     if (Array.isArray(launch.slots)) setLaunchSlots(launch.slots.map(Number));
     if (typeof launch.reopen === 'boolean') setReopenAccounts(launch.reopen);
   }
+  // Fires the onChanged -> buildMenu callback itself; a second explicit buildMenu() here
+  // rebuilt the whole menu twice per save.
   refreshAccountPresentation();
-  buildMenu();
   return true;
 });
 
 ipcMain.on('accounts:close', (event) => {
-  const win = BrowserWindow.fromWebContents(event.sender);
+  if (!fromAccountsWindow(event)) return;
+  const win = getAccountsWindow();
   if (win && !win.isDestroyed()) win.close();
 });
 
 app.setName(APP_NAME);
-// Must follow setName: one of the stylesheet sources lives under userData.
-loadCustomCss();
-// Must follow setName: the preference file lives under userData, which is named after the app.
-loadAccounts();
-watchAccountsFile();
-// Single sign-on across the apps: sign into an account once, and the other apps for it adopt
-// the session. Shares only Google auth cookies, encrypted at rest with a key in the OS
-// keyring, keyed by the signed-in email — see session-sync.js. Disables itself if the
-// keyring is unavailable, so this call is safe on any platform.
-sessionSync.init({
-  storeDir: path.join(ACCOUNTS_DIR, 'sessions'),
-  emailForSlot: (n) => accountConfig(n).email,
-  windowsForSlot: (n) => { const w = windows.get(n); return w ? [w] : []; },
-  log: logRecovery,
-});
-loadThemePreference();
-loadRestoreState();
-applyColorScheme();
-// Before app ready on purpose: GTK reads GTK_THEME once, when the toolkit initializes.
-applyGtkTheme();
-watchPortalColorScheme();
-app.userAgentFallback = CHROME_UA;
-// Drop the Electron build flag that can taint requests.
-app.commandLine.appendSwitch('disable-blink-features', 'AutomationControlled');
-// Keep EVERY window live — not just the focused one — so background account windows
-// keep refreshing (Calendar data) and keep firing reminders/notifications. Without these,
-// Chromium throttles/suspends background renderers and only the foreground profile updates.
-app.commandLine.appendSwitch('disable-background-timer-throttling');
-app.commandLine.appendSwitch('disable-renderer-backgrounding');
-app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
-
-
-// Close the two would-be cycles described at the top of this file.
-menu.init({ openAccountWindow, nextFreeSlot, openAccountsWindow });
-theme.onChanged(buildMenu);
-accountsModule.onChanged(buildMenu);
 
 // One process per app. macOS gives this for free (re-launching a .app just activates the
 // running copy), but on Linux every click in the app grid / every `gmail` from a shell
 // would otherwise start a SECOND process pointed at the same per-account partition dirs —
 // which Chromium's profile lock rejects, so the new copy comes up with broken storage.
 // Instead, hand the request to the running instance and let it surface a window.
+//
+// The lock is taken before any of the startup side effects below: a process that is about
+// to quit has no business reading files, watching directories, or starting the session-sync
+// worker for profile dirs it does not own.
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 if (!gotSingleInstanceLock) {
   app.quit();
 } else {
+  // Must follow setName: one of the stylesheet sources lives under userData.
+  loadCustomCss();
+  // Must follow setName: the preference file lives under userData, which is named after the app.
+  loadAccounts();
+  watchAccountsFile();
+  // Single sign-on across the apps: sign into an account once, and the other apps for it adopt
+  // the session. Shares only Google auth cookies, encrypted at rest with a key in the OS
+  // keyring, keyed by the signed-in email — see session-sync.js. Disables itself if the
+  // keyring is unavailable, so this call is safe on any platform.
+  sessionSync.init({
+    storeDir: path.join(ACCOUNTS_DIR, 'sessions'),
+    emailForSlot: (n) => accountConfig(n).email,
+    windowsForSlot: (n) => { const w = windows.get(n); return w ? [w] : []; },
+    log: logRecovery,
+  });
+  loadThemePreference();
+  loadRestoreState();
+  applyColorScheme();
+  // Before app ready on purpose: GTK reads GTK_THEME once, when the toolkit initializes.
+  applyGtkTheme();
+  watchPortalColorScheme();
+  app.userAgentFallback = CHROME_UA;
+  // Drop the Electron build flag that can taint requests.
+  app.commandLine.appendSwitch('disable-blink-features', 'AutomationControlled');
+  // Keep EVERY window live — not just the focused one — so background account windows
+  // keep refreshing (Calendar data) and keep firing reminders/notifications. Without these,
+  // Chromium throttles/suspends background renderers and only the foreground profile updates.
+  app.commandLine.appendSwitch('disable-background-timer-throttling');
+  app.commandLine.appendSwitch('disable-renderer-backgrounding');
+  app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
+
+  // Close the two would-be cycles described at the top of this file.
+  menu.init({ openAccountWindow, nextFreeSlot, openAccountsWindow });
+  theme.onChanged(buildMenu);
+  accountsModule.onChanged(buildMenu);
+
+  // Resolves once the first account windows exist (or startup failed). 'second-instance' can
+  // fire while the Widevine wait is still pending, and a renderer created before the CDM is
+  // installed never gets one for its whole life (see whenWidevineReady) — so it waits here
+  // rather than creating a window early.
+  let resolveStartup;
+  const startupComplete = new Promise((resolve) => { resolveStartup = resolve; });
+
   app.on('second-instance', (event, argv) => {
-    // A handled link (mailto: in Gmail) goes to account 1, the account the app opens on.
-    const target = handlers.handledUrlFromArgv(argv);
-    if (target) { openHandledWindow(1, target); return; }
-    const link = handoff.linkFromArgv(argv, isFirstPartyUrl);
-    if (link) { openHandedLink(link); return; }
-    const open = BrowserWindow.getAllWindows().filter((w) => !w.isDestroyed());
-    if (open.length === 0) { openAccountWindow(nextFreeSlot()); return; }
-    const win = open[0];
-    if (win.isMinimized()) win.restore();
-    win.show();
-    win.focus();
+    startupComplete.then(() => {
+      // A handled link (mailto: in Gmail) goes to account 1, the account the app opens on.
+      const target = handlers.handledUrlFromArgv(argv);
+      if (target) { openHandledWindow(1, target); return; }
+      const link = handoff.linkFromArgv(argv, isFirstPartyUrl);
+      if (link) { openHandedLink(link); return; }
+      // Prefer one of our OWN account windows. getAllWindows() also returns the Accounts
+      // window and any pop-out, and surfacing one of those on a second `gmail` click is not
+      // what the user asked for.
+      const open = [...windows.values()].filter((w) => w && !w.isDestroyed());
+      if (open.length === 0) { openAccountWindow(nextFreeSlot()); return; }
+      focusWindow(open[0]);
+    }).catch((e) => logRecovery('second-instance handling failed: ' + (e && e.message)));
   });
 
   app.whenReady().then(async () => {
@@ -344,6 +440,8 @@ if (!gotSingleInstanceLock) {
     buildMenu();
     // Highest slot first, so Account 1 — the one a handled link goes to — ends up in front.
     takeLaunchSlots().reverse().forEach((n) => openAccountWindow(n));
+    // The renderers above were created after the CDM wait, so 'second-instance' may proceed.
+    resolveStartup();
     const launchTarget = handlers.handledUrlFromArgv(process.argv);
     if (launchTarget) openHandledWindow(1, launchTarget);
     const launchLink = handoff.linkFromArgv(process.argv, isFirstPartyUrl);
@@ -357,13 +455,21 @@ if (!gotSingleInstanceLock) {
     try {
       const marker = path.join(app.getPath('userData'), '.notif-registered');
       if (!fs.existsSync(marker) && Notification.isSupported()) {
-        nativeNotification({ title: APP_NAME, body: APP_NAME + ' notifications are enabled.' }).show();
+        // Via showNotificationFor so the object is held in `live` until clicked/closed;
+        // a bare Notification here left the banner up but dropped its activation.
+        showNotificationFor(null, { title: APP_NAME, body: APP_NAME + ' notifications are enabled.' }, 'first-run');
         fs.writeFileSync(marker, '1');
       }
     } catch (e) { /* non-fatal */ }
 
     app.on('activate', () => {
-      if (BrowserWindow.getAllWindows().length === 0) openAccountWindow(1);
+      if (BrowserWindow.getAllWindows().length === 0) {
+        // macOS keeps the process alive with zero windows. Reopen the same set a launch
+        // would: "Open at launch", plus last session's if Reopen is on. takeLaunchSlots()
+        // would consume that record, so read it without resetting it.
+        const slots = getLaunchSlots();
+        (slots.length ? slots : [1]).forEach((n) => openAccountWindow(n));
+      }
     });
 
     // After the machine wakes from sleep, a long-idle Google session can drop its live
@@ -384,6 +490,11 @@ if (!gotSingleInstanceLock) {
     // backstop trigger. The reachability probe means a spurious unlock costs one HEAD
     // request, and the single-flight guard means a real wake does not recover twice.
     powerMonitor.on('unlock-screen', () => recoverAfterResume('unlock-screen'));
+  }).catch((e) => {
+    // Never leave 'second-instance' waiting on a startup that failed: it would hang the
+    // running instance's window request with no diagnostic. Log and release it.
+    logRecovery('startup failed: ' + (e && e.message));
+    resolveStartup();
   });
 }
 
