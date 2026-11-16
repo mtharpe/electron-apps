@@ -21,8 +21,9 @@ PREREQ_REQUIRED_NODE="22.12.0"
 
 # "1" if version $1 >= version $2 (dotted numeric).
 prereq_version_ge() {
-  local IFS=.
-  local a=($1) b=($2) i
+  local a b i
+  IFS=. read -r -a a <<< "$1"
+  IFS=. read -r -a b <<< "$2"
   for i in 0 1 2; do
     [ "${a[$i]:-0}" -gt "${b[$i]:-0}" ] && return 0
     [ "${a[$i]:-0}" -lt "${b[$i]:-0}" ] && return 1
@@ -30,13 +31,21 @@ prereq_version_ge() {
   return 0
 }
 
+# Echo the package manager, or nothing. MUST return 0 on every path: called as
+# `pm="$(prereq_pm)"`, a non-zero status makes the assignment fail and `set -e` aborts the
+# build with no message (a Mac without Homebrew, or an unlisted distro, is exactly the case
+# the "install these yourself" guidance exists for).
 prereq_pm() {
-  if [ "$(uname -s)" = Darwin ]; then command -v brew >/dev/null 2>&1 && echo brew; return; fi
-  command -v abroot >/dev/null 2>&1 && { echo abroot; return; }
-  { [ -e /run/ostree-booted ] && command -v rpm-ostree >/dev/null 2>&1; } && { echo rpm-ostree; return; }
+  if [ "$(uname -s)" = Darwin ]; then
+    command -v brew >/dev/null 2>&1 && echo brew
+    return 0
+  fi
+  command -v abroot >/dev/null 2>&1 && { echo abroot; return 0; }
+  { [ -e /run/ostree-booted ] && command -v rpm-ostree >/dev/null 2>&1; } && { echo rpm-ostree; return 0; }
   for pm in apt-get dnf zypper pacman; do
-    command -v "$pm" >/dev/null 2>&1 && { echo "$pm"; return; }
+    command -v "$pm" >/dev/null 2>&1 && { echo "$pm"; return 0; }
   done
+  return 0
 }
 
 # The package that provides tool $1 under package manager $2.
@@ -53,6 +62,7 @@ prereq_pkg() {
     rpm-ostree:rsvg-convert)                   echo librsvg2-tools ;;
     rpm-ostree:secret-tool)                    echo libsecret ;;
     pacman:node)             echo nodejs ;;
+    pacman:python3)          echo python ;;
     pacman:rsvg-convert)     echo librsvg ;;
     pacman:secret-tool)      echo libsecret ;;
     *)                       echo "$1" ;;
@@ -88,7 +98,7 @@ prereq_has_keyring_client() {
 
 ensure_prereqs() {
   local required="" optional="" t
-  for t in node npm curl python3; do
+  for t in node npm curl python3 unzip; do
     command -v "$t" >/dev/null 2>&1 || required="$required $t"
   done
   if command -v node >/dev/null 2>&1; then
@@ -125,17 +135,21 @@ ensure_prereqs() {
     echo "    Skipping install (INSTALL_PREREQS=0):$pkgs"
   else
     local go="${INSTALL_PREREQS:-}"
+    local declined=0
     if [ -z "$go" ] && [ -t 0 ]; then
       local reply
       printf "    Install them now with %s:%s ? [Y/n] " "$pm" "$pkgs"
       # `read` returns non-zero at EOF; under `set -e` that would abort the whole build
       # before the user ever saw the prompt's default. An empty answer means yes.
       read -r reply || reply=''
-      case "$reply" in [nN]*) go=0 ;; *) go=1 ;; esac
+      case "$reply" in [nN]*) go=0; declined=1 ;; *) go=1 ;; esac
     fi
     if [ "$go" = 1 ]; then
-      # shellcheck disable=SC2086 — word splitting into package names is the point
+      # Word splitting into package names is the point here.
+      # shellcheck disable=SC2086
       prereq_install "$pm" $pkgs || echo "    Install failed; continuing with what is present." >&2
+    elif [ "$declined" = 1 ]; then
+      echo "    Not installing (skipped at your request):$pkgs"
     else
       echo "    Not installing (no terminal to ask; INSTALL_PREREQS=1 to allow):$pkgs"
     fi

@@ -28,11 +28,20 @@ fi
 # ARCH below, and a universal build would need both a darwin-x64 and a darwin-arm64
 # download, which this script does not do.
 ARCH="${ARCH:-$([ "$(uname -m)" = "x86_64" ] && echo x64 || echo arm64)}"
+case "$ARCH" in
+  x86_64|amd64) ARCH=x64 ;;
+  aarch64)      ARCH=arm64 ;;
+  x64|arm64)    ;;
+  *) echo "Unsupported ARCH=$ARCH (supported: x64, arm64; universal is not published)" >&2; exit 1 ;;
+esac
 
+# shellcheck disable=SC1091  # path is $DIR-relative, resolved at run time
 . "$DIR/services.conf"
 # Shared with build-linux.sh so both installers agree on what an app can be called.
+# shellcheck disable=SC1091
 . "$DIR/select-services.sh"
 # ensure_prereqs(): what the build and the apps need, offered for install if missing.
+# shellcheck disable=SC1091
 . "$DIR/prereqs.sh"
 
 usage() { sed -n '2,13p' "$DIR/$(basename "${BASH_SOURCE[0]}")" | sed 's/^# \{0,1\}//'; }
@@ -113,53 +122,76 @@ fi
 # stops. The zip's URL basename already carries the same suffix, so download and
 # lookup names cannot drift.
 STAGED_ZIP="$ELECTRON_ZIP_DIR/electron-v${ELECTRON_VER}+wvcus-darwin-${ARCH}.zip"
+CHECKSUMS="$DIR/node_modules/electron/checksums.json"
+zip_name="electron-v${ELECTRON_VER}+wvcus-darwin-${ARCH}.zip"
+
+# Refuse an arch the pinned release does not publish BEFORE downloading ~100 MB.
+if [ -f "$CHECKSUMS" ] && ! node -e 'const c=require(process.argv[1]); process.exit(c[process.argv[2]] ? 0 : 1)' "$CHECKSUMS" "$zip_name"; then
+  echo "    Electron $ELECTRON_VER+wvcus does not publish $zip_name." >&2
+  echo "    Available: $(node -e 'const c=require(process.argv[1]); process.stdout.write(Object.keys(c).filter(k => k.indexOf(process.argv[2]) !== -1 && /\.zip$/.test(k)).join(" "))' "$CHECKSUMS" "+wvcus-darwin-")" >&2
+  exit 1
+fi
+
+verify_zip() {
+  local f="$1" expected actual
+  unzip -tq "$f" >/dev/null 2>&1 || return 1
+  [ -f "$CHECKSUMS" ] || return 0
+  expected="$(node -e 'const c=require(process.argv[1]); process.stdout.write(c[process.argv[2]] || "")' "$CHECKSUMS" "$zip_name")"
+  [ -n "$expected" ] || return 1
+  actual="$(node -e 'const c=require("crypto"),f=require("fs"); process.stdout.write(c.createHash("sha256").update(f.readFileSync(process.argv[1])).digest("hex"))' "$f")"
+  [ "$actual" = "$expected" ]
+}
+
+# Verify a cache hit too: an older script (or a mirror answering 200 with an error page)
+# could have staged something unusable, and file size alone cannot tell.
+if [ -s "$STAGED_ZIP" ] && ! verify_zip "$STAGED_ZIP"; then
+  echo "    cached Electron archive failed verification — discarding it"
+  rm -f "$STAGED_ZIP"
+fi
 if [ ! -s "$STAGED_ZIP" ]; then
-  # ELECTRON_ZIP_URL fully overrides for an internal mirror; ELECTRON_MIRROR still
-  # works as the base if someone had already set it. Neither is required. A mirror is a
-  # BASE URL, so join it with exactly one slash whether or not it was given one.
+  # ELECTRON_ZIP_URL fully overrides; ELECTRON_MIRROR is a BASE URL, so join with exactly
+  # one slash.
   MIRROR="${ELECTRON_MIRROR:-https://github.com/castlabs/electron-releases/releases/download/}"
   URL="${ELECTRON_ZIP_URL:-${MIRROR%/}/v${ELECTRON_VER}+wvcus/electron-v${ELECTRON_VER}+wvcus-darwin-${ARCH}.zip}"
   echo "==> Downloading Electron $ELECTRON_VER+wvcus (darwin-$ARCH)"
   part="$(mktemp "$ELECTRON_ZIP_DIR/.dl.XXXXXX")"
-  # The partial download is removed on any exit, including an abort below.
-  trap 'rm -f "$part"' EXIT INT TERM HUP PIPE
-  # --proto '=https' plus --tlsv1.2 keeps a mirror or redirect from silently downgrading
-  # the transport the archive is fetched over.
+  trap 'rm -f "$part"' EXIT
+  trap 'rm -f "$part"; exit 130' INT TERM HUP PIPE
   curl -fSL --proto '=https' --tlsv1.2 --retry 3 -o "$part" "$URL"
-  # A truncated download, or an HTML error page saved under a .zip name, must never be
-  # staged as if it were a usable Electron build.
-  unzip -tq "$part" >/dev/null
-  # Bypassing @electron/get also skipped its checksum step. When the installed electron
-  # package publishes castlabs' checksums, require the archive to match the pin. A missing
-  # entry means this platform/arch is not one the pinned release publishes.
-  CHECKSUMS="$DIR/node_modules/electron/checksums.json"
-  if [ -f "$CHECKSUMS" ]; then
-    zip_name="electron-v${ELECTRON_VER}+wvcus-darwin-${ARCH}.zip"
-    expected="$(node -e 'const c=require(process.argv[1]); process.stdout.write(c[process.argv[2]] || "")' "$CHECKSUMS" "$zip_name")"
-    if [ -z "$expected" ]; then
-      echo "    no SHA-256 for $zip_name in $CHECKSUMS — this platform/arch may not be published for the pinned Electron" >&2
-      exit 1
-    fi
-    actual="$(node -e 'const c=require("crypto"),f=require("fs"); process.stdout.write(c.createHash("sha256").update(f.readFileSync(process.argv[1])).digest("hex"))' "$part")"
-    if [ "$actual" != "$expected" ]; then
-      echo "    SHA-256 mismatch for $URL" >&2
-      echo "      expected $expected" >&2
-      echo "      got      $actual" >&2
-      exit 1
-    fi
+  if ! verify_zip "$part"; then
+    echo "    downloaded archive failed integrity/checksum verification" >&2
+    rm -f "$part"
+    exit 1
   fi
   mv "$part" "$STAGED_ZIP"
   trap - EXIT INT TERM HUP PIPE
 fi
 
-# build/ and app-config.json are this run's scratch output. Clean them from an EXIT trap so
-# a `set -e` abort partway through the loop removes them too, not only a finished build.
-cleanup_build() { rm -rf "$DIR/build" "$DIR/app-config.json"; }
-trap cleanup_build EXIT INT TERM HUP PIPE
+# Two concurrent runs would rewrite the same package.json/app-config.json/build/. Serialise.
+BUILD_LOCK="$DIR/.build-lock"
+if ! mkdir "$BUILD_LOCK" 2>/dev/null; then
+  echo "Another build is running (or stale $BUILD_LOCK exists). Remove it if no build is active." >&2
+  exit 1
+fi
+
+# build/ and app-config.json are this run's scratch output. Clean them from the trap so a
+# `set -e` abort partway through the loop removes them too. The handler must EXIT: a trap
+# that only restores and returns lets bash resume the build after SIGTERM/SIGPIPE.
+cleanup_build() { rm -rf "$DIR/build" "$DIR/app-config.json"; rmdir "$BUILD_LOCK" 2>/dev/null || true; }
+trap cleanup_build EXIT
+trap 'cleanup_build; exit 130' INT
+trap 'cleanup_build; exit 143' TERM
+trap 'cleanup_build; exit 129' HUP
+trap 'cleanup_build; exit 141' PIPE
 rm -rf "$DIR/build" "$DIR/app-config.json"
 mkdir -p "$DIR/build"
 for entry in "${SELECTED[@]}"; do
+  case "$entry" in
+    *$'\r'*) echo "    services.conf contains CR characters (CRLF endings); convert it to LF" >&2; exit 1 ;;
+  esac
+  # shellcheck disable=SC2034  # freedesktop categories are Linux-only; parsed but unused on macOS
   IFS='|' read -r name icon url bid categories related drm paths handlers single <<< "$entry"
+  case "$name" in -*) echo "    service name may not start with '-': $name" >&2; exit 1 ;; esac
   echo "==> Building $name"
   # slug travels into the app so main.js can find styles/<slug>.css without re-deriving it.
   # drm is a plain boolean the runtime reads to decide whether to wait on Widevine.
@@ -167,22 +199,35 @@ for entry in "${SELECTED[@]}"; do
   # larger site (see services.conf); empty for the common case where the app owns its
   # whole domain. handlers maps link schemes this app takes over (mailto: for Gmail).
   slug="$(slugify "$name")"
-  /usr/bin/python3 -c "import json,sys; json.dump({'name':sys.argv[1],'url':sys.argv[2],'slug':sys.argv[3],'related':sys.argv[4],'drm':sys.argv[5]=='1','paths':sys.argv[6],'handlers':sys.argv[7],'single':sys.argv[8]=='1'}, open('app-config.json','w'))" "$name" "$url" "$slug" "${related:-}" "${drm:-}" "${paths:-}" "${handlers:-}" "${single:-}"
+  python3 -c "import json,sys; json.dump({'name':sys.argv[1],'url':sys.argv[2],'slug':sys.argv[3],'related':sys.argv[4],'drm':sys.argv[5]=='1','paths':sys.argv[6],'handlers':sys.argv[7],'single':sys.argv[8]=='1'}, open('app-config.json','w'))" "$name" "$url" "$slug" "${related:-}" "${drm:-}" "${paths:-}" "${handlers:-}" "${single:-}"
   npx electron-packager . "$name" --platform=darwin --arch="$ARCH" \
     --icon="$DIR/icons/$icon.icns" --app-bundle-id="$bid" --app-version=1.0.0 \
     --electron-zip-dir="$ELECTRON_ZIP_DIR" \
     "${IGNORE_FLAGS[@]}" \
     --out="$DIR/build" --overwrite >/dev/null
   mkdir -p "$HOME/Applications"
-  rm -rf "$HOME/Applications/$name.app"
-  cp -R "$DIR/build/$name-darwin-$ARCH/$name.app" "$HOME/Applications/"
+  # Install by swap, mirroring build-linux.sh: stage and sign the new bundle first, then
+  # replace the old one. Deleting the working app before the copy means a failed copy or
+  # codesign leaves the user with an app that will not launch and no previous version.
+  dest="$HOME/Applications/$name.app"
+  staged_app="$HOME/Applications/.$name.app.new"
+  old_app="$HOME/Applications/.$name.app.old"
+  rm -rf "$staged_app"
+  cp -R "$DIR/build/$name-darwin-$ARCH/$name.app" "$staged_app"
   # By absolute path: a Homebrew or pip `xattr` earlier on PATH has no -r, fails the whole
   # step, and prints its usage to stdout, which the 2>/dev/null does not hide.
-  /usr/bin/xattr -dr com.apple.quarantine "$HOME/Applications/$name.app" 2>/dev/null || true
+  /usr/bin/xattr -dr com.apple.quarantine "$staged_app" 2>/dev/null || true
   # An unsigned bundle is refused by Gatekeeper on current macOS, so a failed codesign is a
-  # failed install -- say so instead of reporting "installed + signed".
-  codesign --force --deep --sign - "$HOME/Applications/$name.app" >/dev/null 2>&1 \
-    || { echo "    codesign failed for $name.app — it will not launch on current macOS" >&2; exit 1; }
+  # failed install. Because it happens on the staged copy, the current app is untouched.
+  if ! codesign --force --deep --sign - "$staged_app" >/dev/null 2>&1; then
+    echo "    codesign failed for $name.app — leaving the installed app untouched" >&2
+    rm -rf "$staged_app"
+    exit 1
+  fi
+  rm -rf "$old_app"
+  if [ -e "$dest" ]; then mv "$dest" "$old_app"; fi
+  mv "$staged_app" "$dest"
+  rm -rf "$old_app"
   echo "    installed + signed: ~/Applications/$name.app"
 done
 cleanup_build

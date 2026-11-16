@@ -25,7 +25,16 @@
 # that hint to decide which app a notification belongs to (its icon, and its entry in the
 # notification settings). Rename the file without renaming the slug and notifications
 # quietly lose their identity.
-slugify() { printf '%s\n' "$1" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-*//; s/-*$//'; }
+# Transliterate before stripping: `tr -cs 'a-z0-9'` deletes an accented letter outright, so
+# "Café" would become "caf" (and collide with "Caf"). iconv is optional; without it the old
+# behaviour stands. The caller rejects an empty result before it reaches any install path.
+slugify() {
+  local s="$1"
+  if command -v iconv >/dev/null 2>&1; then
+    s="$(printf '%s' "$s" | iconv -f UTF-8 -t ASCII//TRANSLIT 2>/dev/null || printf '%s' "$s")"
+  fi
+  printf '%s\n' "$s" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-*//; s/-*$//'
+}
 
 _lower() { echo "$1" | tr '[:upper:]' '[:lower:]'; }
 
@@ -109,6 +118,12 @@ _interactive_select() {
     case "$token" in
       *[!0-9]*) _select_one "$token" || return 1 ;;
       *)
+        # Bound the length before arithmetic: bash integers are 64-bit and wrap, so a huge
+        # digit string can land back inside 1..$total and silently pick an app.
+        if [ "${#token}" -gt 6 ]; then
+          echo "No app number $token — pick between 1 and $total." >&2
+          return 1
+        fi
         # 10# forces base 10: bash reads a leading zero as octal, so "08" would otherwise
         # be an invalid octal number instead of app 8.
         token=$((10#${token}))
