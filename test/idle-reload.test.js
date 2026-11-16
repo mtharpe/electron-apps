@@ -25,6 +25,7 @@ function fakeWin(opts = {}) {
       isCurrentlyAudible: () => state.audible,
       isDevToolsOpened: () => false,
       getURL: () => state.url,
+      loadURL: () => { win.reloads++; return Promise.resolve(); },
       reload: () => { win.reloads++; },
     },
   };
