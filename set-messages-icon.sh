@@ -26,7 +26,8 @@ swift - "$APP" "$ICON" <<'SWIFT'
 import AppKit
 let app = CommandLine.arguments[1], icon = CommandLine.arguments[2]
 guard let img = NSImage(contentsOfFile: icon) else { print("cannot load \(icon)"); exit(1) }
-print(NSWorkspace.shared.setIcon(img, forFile: app, options: []) ? "icon set on \(app)" : "setIcon failed")
+guard NSWorkspace.shared.setIcon(img, forFile: app, options: []) else { print("setIcon failed on \(app)"); exit(2) }
+print("icon set on \(app)")
 SWIFT
 
 killall Dock 2>/dev/null || true

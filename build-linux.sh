@@ -10,10 +10,10 @@
 #         ./build-linux.sh --uninstall      # remove everything this installed
 #         ./build-linux.sh --uninstall keep # remove just those
 #         PREFIX=~/.local ./build-linux.sh
-#         ARCH=arm64 ./build-linux.sh
+#         ARCH=x64 ./build-linux.sh         # only an arch castlabs publishes for the pin
 #         ICON_THEME=Papirus-Dark ./build-linux.sh   # default: whatever this machine uses
 #
-# Requires: node + npm, curl, python3 — checked first, and offered for install if missing
+# Requires: node + npm, curl, python3, unzip — checked first, and offered for install if missing
 # (prereqs.sh). ImageMagick or python3-Pillow is used to build the icon-size
 # ladder; without either, a single full-size icon is installed instead.
 #
@@ -35,12 +35,22 @@ case "${ARCH:-$(uname -m)}" in
   *)                ARCH="${ARCH:-$(uname -m)}" ;;
 esac
 
+# shellcheck disable=SC1091  # path is $DIR-relative, resolved at run time
 . "$DIR/services.conf"
 # Provides slugify(), list_services() and resolve_services() — shared with build.sh so the
 # two installers can't disagree about what an app is called.
+# shellcheck disable=SC1091
 . "$DIR/select-services.sh"
 # ensure_prereqs(): what the build and the apps need, offered for install if missing.
+# shellcheck disable=SC1091
 . "$DIR/prereqs.sh"
+
+# A relative PREFIX would land a relative Exec= in the .desktop file, which the desktop
+# cannot launch. Require absolute before any path is derived from it.
+case "$PREFIX" in
+  /*) ;;
+  *) echo "PREFIX must be an absolute path: $PREFIX" >&2; exit 1 ;;
+esac
 
 APPS_DIR="$PREFIX/share/applications"
 ICONS_DIR="$PREFIX/share/icons/hicolor"
@@ -51,7 +61,7 @@ uninstall_one() {
   # i.e. every installed app. Names in services.conf always yield one, but a malformed
   # argument must fail rather than take the whole install with it.
   [ -n "$slug" ] || { echo "    refusing to uninstall: empty app slug" >&2; return 1; }
-  rm -rf "$PREFIX/lib/$slug"
+  rm -rf "$PREFIX/lib/${slug:?}" "$PREFIX/lib/.${slug:?}.new" "$PREFIX/lib/.${slug:?}.old"
   rm -f  "$PREFIX/bin/$slug" "$APPS_DIR/$slug.desktop"
   find "$ICONS_DIR" -name "$slug.png" -delete 2>/dev/null || true
 }
@@ -402,40 +412,55 @@ fi
 # stops. The zip's URL basename already carries the same suffix, so download and
 # lookup names cannot drift.
 STAGED_ZIP="$ELECTRON_ZIP_DIR/electron-v${ELECTRON_VER}+wvcus-linux-${ARCH}.zip"
+CHECKSUMS="$DIR/node_modules/electron/checksums.json"
+zip_name="electron-v${ELECTRON_VER}+wvcus-linux-${ARCH}.zip"
+
+# Refuse an arch the pinned release does not publish BEFORE downloading ~100 MB. castlabs
+# publishes linux-x64 only for this pin; arm64/armv7l would otherwise be discovered only
+# after the whole archive had been fetched.
+if [ -f "$CHECKSUMS" ] && ! node -e 'const c=require(process.argv[1]); process.exit(c[process.argv[2]] ? 0 : 1)' "$CHECKSUMS" "$zip_name"; then
+  echo "    Electron $ELECTRON_VER+wvcus does not publish $zip_name." >&2
+  echo "    Available: $(node -e 'const c=require(process.argv[1]); process.stdout.write(Object.keys(c).filter(k => k.indexOf(process.argv[2]) !== -1 && /\.zip$/.test(k)).join(" "))' "$CHECKSUMS" "+wvcus-linux-")" >&2
+  exit 1
+fi
+
+# Integrity of an archive, cached or freshly downloaded.
+verify_zip() {
+  local f="$1" expected actual
+  unzip -tq "$f" >/dev/null 2>&1 || return 1
+  [ -f "$CHECKSUMS" ] || return 0
+  expected="$(node -e 'const c=require(process.argv[1]); process.stdout.write(c[process.argv[2]] || "")' "$CHECKSUMS" "$zip_name")"
+  [ -n "$expected" ] || return 1
+  actual="$(node -e 'const c=require("crypto"),f=require("fs"); process.stdout.write(c.createHash("sha256").update(f.readFileSync(process.argv[1])).digest("hex"))' "$f")"
+  [ "$actual" = "$expected" ]
+}
+
+# Verify a cache hit too: an older script (or a mirror answering 200 with an error page)
+# could have staged something unusable, and file size alone cannot tell. A failed check
+# discards the cache and downloads afresh.
+if [ -s "$STAGED_ZIP" ] && ! verify_zip "$STAGED_ZIP"; then
+  echo "    cached Electron archive failed verification — discarding it"
+  rm -f "$STAGED_ZIP"
+fi
 if [ ! -s "$STAGED_ZIP" ]; then
-  # ELECTRON_ZIP_URL fully overrides for an internal mirror; ELECTRON_MIRROR still
-  # works as the base if someone had already set it. Neither is required. A mirror is a
-  # BASE URL, so join it with exactly one slash whether or not it was given one.
+  # ELECTRON_ZIP_URL fully overrides for an internal mirror; ELECTRON_MIRROR still works as
+  # the base if someone had already set it. A mirror is a BASE URL, so join it with exactly
+  # one slash whether or not it was given one.
   MIRROR="${ELECTRON_MIRROR:-https://github.com/castlabs/electron-releases/releases/download/}"
   URL="${ELECTRON_ZIP_URL:-${MIRROR%/}/v${ELECTRON_VER}+wvcus/electron-v${ELECTRON_VER}+wvcus-linux-${ARCH}.zip}"
   echo "==> Downloading Electron $ELECTRON_VER+wvcus (linux-$ARCH)"
   part="$(mktemp "$ELECTRON_ZIP_DIR/.dl.XXXXXX")"
-  # The partial download is removed on any exit, including an abort below.
-  trap 'rm -f "$part"' EXIT INT TERM HUP PIPE
+  trap 'rm -f "$part"' EXIT
   # --proto '=https' plus --tlsv1.2 keeps a mirror or redirect from silently downgrading
   # the transport the archive is fetched over.
+  trap 'rm -f "$part"; exit 130' INT TERM HUP PIPE
   curl -fSL --proto '=https' --tlsv1.2 --retry 3 -o "$part" "$URL"
   # A truncated download, or an HTML error page saved under a .zip name, must never be
   # staged as if it were a usable Electron build.
-  unzip -tq "$part" >/dev/null
-  # Bypassing @electron/get also skipped its checksum step. When the installed electron
-  # package publishes castlabs' checksums, require the archive to match the pin. A missing
-  # entry means this platform/arch is not one the pinned release publishes.
-  CHECKSUMS="$DIR/node_modules/electron/checksums.json"
-  if [ -f "$CHECKSUMS" ]; then
-    zip_name="electron-v${ELECTRON_VER}+wvcus-linux-${ARCH}.zip"
-    expected="$(node -e 'const c=require(process.argv[1]); process.stdout.write(c[process.argv[2]] || "")' "$CHECKSUMS" "$zip_name")"
-    if [ -z "$expected" ]; then
-      echo "    no SHA-256 for $zip_name in $CHECKSUMS — this platform/arch may not be published for the pinned Electron" >&2
-      exit 1
-    fi
-    actual="$(node -e 'const c=require("crypto"),f=require("fs"); process.stdout.write(c.createHash("sha256").update(f.readFileSync(process.argv[1])).digest("hex"))' "$part")"
-    if [ "$actual" != "$expected" ]; then
-      echo "    SHA-256 mismatch for $URL" >&2
-      echo "      expected $expected" >&2
-      echo "      got      $actual" >&2
-      exit 1
-    fi
+  if ! verify_zip "$part"; then
+    echo "    downloaded archive failed integrity/checksum verification" >&2
+    rm -f "$part"
+    exit 1
   fi
   mv "$part" "$STAGED_ZIP"
   trap - EXIT INT TERM HUP PIPE
@@ -448,6 +473,15 @@ fi
 # Chromium's --class switch, both of which are applied too late to affect it. So the value
 # has to be baked in per service at package time. The working tree is restored on any exit,
 # including Ctrl-C, so an interrupted build never leaves package.json rewritten.
+# Two concurrent runs would rewrite the same package.json/app-config.json/build/ and could
+# package one service with another's productName. Serialise them. The lock is created only
+# now, after the read-only prerequisite and download phases.
+BUILD_LOCK="$DIR/.build-lock"
+if ! mkdir "$BUILD_LOCK" 2>/dev/null; then
+  echo "Another build is running (or stale $BUILD_LOCK exists). Remove it if no build is active." >&2
+  exit 1
+fi
+
 PKG_BACKUP="$(mktemp)"
 cp package.json "$PKG_BACKUP"
 # One EXIT handler for both kinds of damage a failed run leaves behind: a package.json with
@@ -457,12 +491,17 @@ cp package.json "$PKG_BACKUP"
 cleanup() {
   rm -rf "$DIR/build" "$DIR/app-config.json"
   if [ -f "$PKG_BACKUP" ]; then cp "$PKG_BACKUP" package.json; rm -f "$PKG_BACKUP"; fi
+  rmdir "$BUILD_LOCK" 2>/dev/null || true
 }
 # HUP/PIPE matter as much as INT/TERM here: piping this script's output to something that
-# exits early (`./build-linux.sh | head`) kills it with SIGPIPE, and an untrapped fatal
-# signal skips the EXIT trap entirely — which would strand a half-built productName in the
-# working tree. Learned by doing exactly that.
-trap cleanup EXIT INT TERM HUP PIPE
+# exits early (`./build-linux.sh | head`) kills it with SIGPIPE. The handler must also EXIT:
+# a trap that only restores and returns lets bash resume the build, so `kill`/`| head` would
+# carry on building and report success.
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
+trap 'cleanup; exit 129' HUP
+trap 'cleanup; exit 141' PIPE
 
 set_product_name() {
   python3 - "$1" <<'PY'
@@ -487,15 +526,28 @@ ICON_THEME="${ICON_THEME:-$(icon_theme_name)}"
 echo "==> Icon theme: $ICON_THEME"
 
 for entry in "${SELECTED[@]}"; do
+  # Reject CRLF-sourced entries: `read -r` keeps the CR in the last field, which would
+  # silently break `single`/`drm` detection and write a broken .desktop line.
+  case "$entry" in
+    *$'\r'*) echo "    services.conf contains CR characters (CRLF endings); convert it to LF" >&2; exit 1 ;;
+  esac
+  # shellcheck disable=SC2034  # bundle-id is macOS-only; parsed but unused on Linux
   IFS='|' read -r name icon url bid categories related drm paths handlers single <<< "$entry"
   slug="$(slugify "$name")"
+  # An all-punctuation display name slugifies to nothing; installing under "$PREFIX/lib/"
+  # would then collide with the app tree itself. Refuse before any path is built. A name
+  # beginning with '-' would also be parsed by electron-packager as an option.
+  [ -n "$slug" ] || { echo "    cannot derive a slug from '$name' — use ASCII letters/digits"; exit 1; }
+  case "$name" in -*) echo "    service name may not start with '-': $name" >&2; exit 1 ;; esac
   echo "==> Building $name"
 
   png="$DIR/icons/png/$icon.png"
   icns="$DIR/icons/$icon.icns"
-  # The PNG is committed for Linux, but the .icns is the source of truth. Re-extract when
-  # the .icns is newer, so updating the artwork cannot keep shipping the old committed PNG.
-  if [ ! -f "$png" ] || { [ -f "$icns" ] && [ "$icns" -nt "$png" ]; }; then
+  # The .icns is the source of truth. Re-extract whenever it exists (not only when it looks
+  # newer): git does not preserve mtimes, so a fresh clone gives both files the same stamp
+  # and a stale committed PNG would silently win. The cmp guard means an unchanged icon
+  # leaves no working-tree change.
+  if [ ! -f "$png" ] || [ -f "$icns" ]; then
     [ -f "$icns" ] || { echo "    missing icons/$icon.icns and icons/png/$icon.png"; exit 1; }
     echo "    extracting icons/png/$icon.png from $icns"
     # Extract to a temporary file and copy only on a real difference: re-extracting an
@@ -586,7 +638,7 @@ for entry in "${SELECTED[@]}"; do
   # file that the desktop silently ignores.
   for _v in "$PREFIX" "$name"; do
     case "$_v" in
-      *$'\n'*) echo "    PREFIX or app name contains a newline, which a .desktop entry cannot represent" >&2; exit 1 ;;
+      *$'\n'*|*$'\r'*) echo "    PREFIX or app name contains a newline/CR, which a .desktop entry cannot represent" >&2; exit 1 ;;
       *%*)     echo "    PREFIX or app name contains '%', which Exec reserves for field codes" >&2; exit 1 ;;
     esac
   done
@@ -595,6 +647,7 @@ for entry in "${SELECTED[@]}"; do
   # '$' and '\' with an extra backslash. Written with printf, not a heredoc, so those
   # backslashes survive instead of being consumed as heredoc escapes.
   exec_path="$PREFIX/lib/$slug/$slug"
+  # shellcheck disable=SC2016  # sed expressions are intentionally single-quoted
   exec_q="\"$(printf '%s' "$exec_path" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/`/\\`/g' -e 's/\$/\\$/g')\""
   {
     printf '[Desktop Entry]\n'
