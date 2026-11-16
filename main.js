@@ -27,7 +27,7 @@ const theme = require('./lib/theme');
 const {
   WINDOW_SLOTS, PROFILE_AUTO, PROFILE_NONE, loadAccounts, watchAccountsFile, accountConfig,
   persistSlots, accounts, chromeProfiles, profileForSlot, accountLabel, rememberAccountEmail,
-  refreshAccountPresentation,
+  refreshAccountPresentation, getDirtySlots,
 } = require('./lib/accounts');
 const accountsModule = require('./lib/accounts');
 const { attachExternalLinkRouting, isFirstPartyHost, isFirstPartyUrl, isAuthHost, inAppUrl } = require('./lib/routing');
@@ -86,6 +86,14 @@ function openAccountWindow(n) {
   // Reopen on the monitor and spot the user left it (see lib/window-place.js); maximized by
   // default, as before, when there is no saved place or its monitor is not connected.
   const place = windowPlace.savedPlace(n);
+  // window-place only records on X11 (Wayland cannot position windows), so fall back to the
+  // bounds restore.json already keeps rather than always reopening maximized.
+  if (Object.keys(place).length === 0 && geometry && geometry.bounds
+      && ['x', 'y', 'width', 'height'].every((k) => Number.isFinite(geometry.bounds[k]))
+      && geometry.bounds.width > 0 && geometry.bounds.height > 0) {
+    Object.assign(place, geometry.bounds);
+    place.__maximized = geometry.maximized !== false;
+  }
   const wantMaximized = place.__maximized !== false;
   delete place.__maximized;
   const win = new BrowserWindow(Object.assign({
@@ -117,9 +125,6 @@ function openAccountWindow(n) {
     // the window is about to be mapped.
     if (wantMaximized && !win.isMaximized()) win.maximize();
     win.show();
-    // Zoom is per webContents and there is no page to zoom until the window exists, so apply
-    // the saved factor after the reveal rather than at construction.
-    if (geometry && typeof geometry.zoom === 'number') win.webContents.setZoomFactor(geometry.zoom);
   };
   revealTimer = setTimeout(reveal, REVEAL_DEADLINE_MS);
   win.once('ready-to-show', reveal);
@@ -133,6 +138,20 @@ function openAccountWindow(n) {
   // would otherwise never share its session. did-finish-load covers that; publish is
   // hash-guarded, so the repeat loads a Google page does are no-ops.
   win.webContents.on('did-finish-load', () => sessionSync.publish(n));
+  // Chromium zoom is per-origin, so applying the saved factor before the app page loads would
+  // set it for about:blank / the sign-in host. Apply once the app's own URL is current (a
+  // sign-in redirect reaches it later), and only once.
+  let zoomApplied = false;
+  const applySavedZoom = () => {
+    if (zoomApplied || !geometry || typeof geometry.zoom !== 'number') return;
+    if (win.isDestroyed() || !win.webContents || win.webContents.isDestroyed()) return;
+    let href = '';
+    try { href = win.webContents.getURL(); } catch (e) { return; }
+    if (!href.startsWith(APP_URL)) return;
+    win.webContents.setZoomFactor(geometry.zoom);
+    zoomApplied = true;
+  };
+  win.webContents.on('did-finish-load', applySavedZoom);
   // Adopt a shared session ONLY if this window actually reaches Google sign-in — so the
   // Google apps (and Tidal's "continue with Google") pick up an existing session, while an
   // app that never authenticates through Google never has a Google session injected into its
@@ -189,10 +208,14 @@ function openHandledWindow(n, url) {
   }, APP_ICON ? { icon: APP_ICON } : {},
   owner && !owner.isDestroyed() ? { parent: owner } : {}));
   win.webContents.setUserAgent(CHROME_UA);
-  const reveal = () => { if (!win.isDestroyed() && !win.isVisible()) win.show(); };
-  const revealTimer = setTimeout(reveal, REVEAL_DEADLINE_MS);
+  let revealTimer = null;
+  const reveal = () => {
+    if (revealTimer) { clearTimeout(revealTimer); revealTimer = null; }
+    if (!win.isDestroyed() && !win.isVisible()) win.show();
+  };
+  revealTimer = setTimeout(reveal, REVEAL_DEADLINE_MS);
   win.once('ready-to-show', reveal);
-  win.on('closed', () => clearTimeout(revealTimer));
+  win.on('closed', () => { if (revealTimer) clearTimeout(revealTimer); });
   win.loadURL(url, { userAgent: CHROME_UA })
     .catch((e) => logRecovery('handled window load failed: ' + (e && e.message)));
   return win;
@@ -334,9 +357,22 @@ ipcMain.handle('accounts:save', (event, incoming, launch) => {
     accounts.set(n, Object.assign({}, current, { name, chromeProfile: profile }));
     touched.push(n);
   }
+  // Include slots already dirty from a failed earlier write: a second Save with no edits
+  // would otherwise compare equal to the in-memory map and skip them, reporting success
+  // while nothing reached disk.
+  const toWrite = new Set(touched);
+  for (const n of getDirtySlots()) toWrite.add(n);
+  const slotsToWrite = Array.from(toWrite);
   let saved = true;
-  if (touched.length > 0) saved = persistSlots(touched);
-  if (!saved) logRecovery('accounts save: file lock busy; kept in memory until the next save');
+  if (slotsToWrite.length > 0) saved = persistSlots(slotsToWrite);
+  if (!saved) {
+    // Dirty slots survive the watcher's reload (accounts.js); retry once and keep the
+    // renderer informed so it does not close as if the write had landed.
+    logRecovery('accounts save: could not persist (lock or I/O); retrying once');
+    setTimeout(() => {
+      if (!persistSlots(slotsToWrite)) logRecovery('accounts save: retry failed; changes kept in memory');
+    }, 250);
+  }
   // Startup choices are this app's own (window-restore.js), not the shared accounts.json.
   if (launch && typeof launch === 'object') {
     if (Array.isArray(launch.slots)) setLaunchSlots(launch.slots.map(Number));
@@ -345,7 +381,7 @@ ipcMain.handle('accounts:save', (event, incoming, launch) => {
   // Fires the onChanged -> buildMenu callback itself; a second explicit buildMenu() here
   // rebuilt the whole menu twice per save.
   refreshAccountPresentation();
-  return saved;
+  return saved && getDirtySlots().length === 0;
 });
 
 ipcMain.on('accounts:close', (event) => {
@@ -511,10 +547,20 @@ if (!gotSingleInstanceLock) {
     // request, and the single-flight guard means a real wake does not recover twice.
     powerMonitor.on('unlock-screen', () => recoverAfterResume('unlock-screen'));
   }).catch((e) => {
-    // Never leave 'second-instance' waiting on a startup that failed: it would hang the
-    // running instance's window request with no diagnostic. Log and release it.
+    // Never leave 'second-instance' waiting on a startup that failed. Also do not leave an
+    // invisible process holding the single-instance lock with no window and no `activate`
+    // handler: try to open a window, and exit only if even that fails.
     logRecovery('startup failed: ' + (e && e.message));
     resolveStartup();
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) openAccountWindow(1);
+    });
+    try {
+      openAccountWindow(1);
+    } catch (e2) {
+      logRecovery('could not open a fallback window: ' + (e2 && e2.message));
+      app.exit(1);
+    }
   });
 }
 

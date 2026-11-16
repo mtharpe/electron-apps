@@ -204,10 +204,17 @@
     const launchSlots = slots
       .filter((slot) => document.querySelector('input.launch[data-slot="' + slot.n + '"]').checked)
       .map((slot) => slot.n);
-    await window.accountsApi.save(collect(), {
+    const saved = await window.accountsApi.save(collect(), {
       slots: launchSlots,
       reopen: document.getElementById('reopen').checked,
     });
+    // main retries a lock-contended write in the background, but do not pretend the save
+    // landed: keep the window open so the user can press Save again.
+    if (saved === false) {
+      document.getElementById('note').textContent =
+        'Could not save just now (another app is writing). Your changes are kept — press Save again.';
+      return;
+    }
     window.accountsApi.close();
   });
   document.getElementById('cancel').addEventListener('click', () => window.accountsApi.close());
