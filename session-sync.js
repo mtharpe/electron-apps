@@ -31,6 +31,9 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const { execFile } = require('child_process');
+// The slot bounds live in the account model: a single-account app owns only slot 1, and
+// scanning past that would touch partitions the app can never open.
+const { WINDOW_SLOTS, ACCOUNT_SLOTS } = require('./lib/accounts');
 
 // --- keyring ---------------------------------------------------------------------------
 
@@ -43,6 +46,10 @@ const KW_ENTRY = 'session-sync';
 const KC_SERVICE = 'electron-apps';          // macOS keychain
 const KC_ACCOUNT = 'session-sync';
 
+// A keyring CLI that never returns would hang the probe forever, so a timed-out call is
+// treated as a failed backend and getKey moves on to the next one.
+const KEYRING_TIMEOUT_MS = 10000;
+
 // Run a keyring CLI. Reports `missing` (the binary is not installed) distinctly from a plain
 // non-zero exit (present, but the key is absent or the store is locked), because the first
 // means "try the next backend" and the second can mean "this backend just has no key yet".
@@ -50,14 +57,19 @@ function runTool(cmd, args, input) {
   return new Promise((resolve) => {
     let child;
     try {
-      child = execFile(cmd, args, { encoding: 'utf8' }, (err, stdout) => {
+      child = execFile(cmd, args, { encoding: 'utf8', timeout: KEYRING_TIMEOUT_MS }, (err, stdout) => {
         resolve({ missing: !!(err && err.code === 'ENOENT'), failed: !!err, stdout: stdout || '' });
       });
     } catch (e) {
       resolve({ missing: true, failed: true, stdout: '' });
       return;
     }
-    if (input != null) { try { child.stdin.end(input); } catch (e) {} }
+    if (input != null) {
+      // The child can exit (or be killed on timeout) before it reads stdin. Without a
+      // listener that EPIPE is an unhandled 'error' event on the stream and kills the app.
+      child.stdin.on('error', () => {});
+      try { child.stdin.end(input); } catch (e) { /* reported through the callback */ }
+    }
   });
 }
 
@@ -143,31 +155,45 @@ async function adoptExistingKey() {
   return null;
 }
 
-const KEY_LOCK_WAIT_MS = 20000;
-// Store plus read-back takes well under a second. A lock older than this was left by an app
-// that died holding it, and waiting on it would only delay the next one for nothing.
-const KEY_LOCK_STALE_MS = 30000;
+// Store plus read-back takes well under a second, so a lock older than this was left by an
+// app that died holding it. The waiter's deadline must outlast the stale window comfortably:
+// with wait < stale it can never reach the point where it is allowed to break a dead lock,
+// and it just gives up while the stale file still sits there.
+const KEY_LOCK_STALE_MS = 15000;
+const KEY_LOCK_WAIT_MS = 45000;
 
-// Resolves to a release function. If the lock cannot be had in time, proceed without it:
-// a rare race beats a feature that never starts.
+// Resolves to a release function, or null if the lock could not be had in time. On timeout
+// the caller re-checks for a key instead of creating one unlocked: two creators writing
+// different keys is exactly the race this lock exists to prevent.
 async function takeKeyLock() {
-  if (!ctx) return () => {};
+  if (!ctx) return null;
   const lock = path.join(ctx.storeDir, '.key-create.lock');
   try { fs.mkdirSync(ctx.storeDir, { recursive: true, mode: 0o700 }); } catch (e) { /* surfaces below */ }
+  // The owner token goes into the file itself, so release only removes OUR lock. If this
+  // process stalls past the stale window, another app may have broken the lock and created
+  // its own; unlinking that on the way out would let a third creator in.
+  const token = process.pid + ':' + crypto.randomBytes(8).toString('hex');
   const deadline = Date.now() + KEY_LOCK_WAIT_MS;
+  let held = false;
   while (Date.now() < deadline) {
     try {
-      fs.closeSync(fs.openSync(lock, 'wx')); // atomic: exactly one creator wins
-      return () => { try { fs.unlinkSync(lock); } catch (e) { /* already gone */ } };
+      fs.writeFileSync(lock, token, { flag: 'wx', mode: 0o600 }); // atomic: exactly one creator wins
+      held = true;
+      break;
     } catch (e) {
-      if (e.code !== 'EEXIST') return () => {};
+      if (e.code !== 'EEXIST') break; // cannot lock here at all; the caller handles null
       try {
         if (Date.now() - fs.statSync(lock).mtimeMs > KEY_LOCK_STALE_MS) fs.unlinkSync(lock);
       } catch (e2) { /* released between the two calls — just retry */ }
       await new Promise((r) => setTimeout(r, 150));
     }
   }
-  return () => {};
+  if (!held) return null;
+  return () => {
+    try {
+      if (fs.readFileSync(lock, 'utf8') === token) fs.unlinkSync(lock);
+    } catch (e) { /* already gone */ }
+  };
 }
 
 let keyPromise = null;
@@ -177,6 +203,12 @@ function getKey() {
     const existing = await adoptExistingKey();
     if (existing) return existing;
     const release = await takeKeyLock();
+    if (!release) {
+      // Someone else is creating the key, or left a lock that could not be cleared in time.
+      // Re-check for their key rather than creating one unlocked — a second key written
+      // beside the first is what makes the published files undecryptable by everyone else.
+      return await adoptExistingKey();
+    }
     try {
       // Whoever held the lock before us may have just created it.
       const created = await adoptExistingKey();
@@ -233,12 +265,15 @@ const isAuthCookieHost = (d) => {
   return h === AUTH_SUFFIX || h.endsWith('.' + AUTH_SUFFIX);
 };
 
-// The cookies whose presence means "signed in" — used both to decide there is a session
-// worth publishing and to hash one session so we can tell two apart.
+// The cookies that make up the session fingerprint (and, when one changes, prompt a
+// publish). __Host-GAPS is deliberately NOT here: accounts.google.com sets it on a visitor
+// who has not signed in, and folding its value into the hash made the publish/adopt guard
+// churn on a cookie that carries no identity. It is still carried in the stored payload —
+// that copies every google.com cookie — just not fingerprinted.
 const SESSION_NAMES = new Set([
   'SID', 'SSID', 'HSID', 'APISID', 'SAPISID', 'LSID',
   '__Secure-1PSID', '__Secure-3PSID', '__Secure-1PAPISID', '__Secure-3PAPISID',
-  '__Host-1PLSID', '__Host-3PLSID', '__Host-GAPS',
+  '__Host-1PLSID', '__Host-3PLSID',
 ]);
 
 function cookieUrl(c) {
@@ -274,11 +309,22 @@ function sessionHash(cookies) {
 
 let ctx = null;         // { storeDir, emailForSlot, windowsForSlot, log }
 let enabled = false;
-const emailHashHex = (email) => crypto.createHash('sha256').update(email.toLowerCase()).digest('hex');
-const storeFile = (email) => path.join(ctx.storeDir, emailHashHex(email) + '.enc');
+// Set once the keyring probe has finished, whatever it decided. Before that, `enabled` being
+// false means "not known yet", not "off", so an auth navigation must be buffered — see init().
+let initSettled = false;
 
-// email -> hash of the session this process last wrote or adopted. Breaks the loop: a
-// process never republishes, nor re-adopts, a session it already reflects.
+const emailHashHex = (email) => crypto.createHash('sha256').update(email.toLowerCase()).digest('hex');
+// Addresses are compared case-insensitively throughout. accounts.json records whatever a
+// page rendered, and two apps can disagree about the casing of the same Google account.
+const emailKey = (email) => String(email || '').trim().toLowerCase();
+const sameEmail = (a, b) => emailKey(a) !== '' && emailKey(a) === emailKey(b);
+const storeFile = (email) => path.join(ctx.storeDir, emailHashHex(email) + '.enc');
+// Logs are shared in bug reports, so an address is never written in the clear.
+const emailTag = (email) => emailHashHex(String(email || '')).slice(0, 12);
+
+// email -> hash of the session this process last wrote or adopted, keyed by emailKey() so a
+// casing change cannot make one identity look like two. Breaks the loop: a process never
+// republishes, nor re-adopts, a session it already reflects.
 const syncedHash = new Map();
 
 function log(msg) { try { ctx.log('[session-sync] ' + msg); } catch (e) {} }
@@ -292,19 +338,79 @@ async function authCookies(ses) {
   return (await ses.cookies.get({})).filter((c) => isAuthCookieHost(c.domain));
 }
 
+async function hasSession(ses) {
+  return !!sessionHash(await authCookies(ses));
+}
+
+// Ask an open slot window who it is actually signed in as. accounts.json holds what was
+// detected at some past load; the window's jar can be signed into a different account by now.
+const LIVE_IDENTITY_JS = `(function(){
+  var a=document.querySelector('[aria-label*="Google Account" i]');
+  var s=a?(a.getAttribute('aria-label')||''):(document.title||'');
+  var m=s.match(/[\\w.+-]+@[\\w.-]+\\.[A-Za-z]{2,}/);
+  return m?m[0]:'';
+})()`;
+
+async function liveIdentityForSlot(slot) {
+  const wins = ctx.windowsForSlot(slot)
+    .filter((w) => w && !w.isDestroyed() && w.webContents && !w.webContents.isDestroyed());
+  if (!wins.length) return { open: false, email: '' };
+  for (const w of wins) {
+    try {
+      const got = await w.webContents.executeJavaScript(LIVE_IDENTITY_JS, true);
+      const email = typeof got === 'string' ? got.trim() : '';
+      if (email) return { open: true, email };
+    } catch (e) { /* navigating or gone — nothing to compare against */ }
+  }
+  return { open: true, email: '' };
+}
 // Publish the slot's current Google session, if it has one and it differs from what the
 // store already holds. Never publishes an empty session — a signed-out app must not wipe the
 // shared login for everyone else.
+//
+// The address it files under comes from accounts.json, which is a memory rather than a live
+// fact: a slot whose window has since been switched to another account still reports the old
+// address until the page is re-scraped. Filing B's cookies under A would make every app's A
+// slot adopt B, so the address is re-read around the snapshot and, when a window is open,
+// checked against the live page. Never rejects: main.js calls this fire-and-forget.
 async function publish(slot) {
+  try {
+    await publishSlot(slot);
+  } catch (e) {
+    log('publish failed: ' + (e && e.message));
+  }
+}
+
+async function publishSlot(slot) {
   if (!enabled) return;
   const email = ctx.emailForSlot(slot);
   if (!email) return; // identity unknown → nothing to key on yet
   const ses = session.fromPartition('persist:account-' + slot);
 
+  // accounts.js can rewrite the address at any moment (a detected sign-in change). Read it
+  // immediately before and after the cookie sweep: if it moved, the snapshot belongs to
+  // neither identity cleanly, so leave the store alone until the next event.
+  const before = ctx.emailForSlot(slot);
   const cookies = await authCookies(ses);
+  const after = ctx.emailForSlot(slot);
+  if (!sameEmail(email, before) || !sameEmail(email, after)) {
+    log('publish skipped for slot ' + slot + ': account address changed while reading cookies');
+    return;
+  }
+
   const hash = sessionHash(cookies);
   if (!hash) return;                       // signed out; leave the store alone
-  if (syncedHash.get(email) === hash) return;
+  if (syncedHash.get(emailKey(after)) === hash) return;
+
+  // With a window open, the live page outranks the remembered address. With no window (a
+  // slot signed in earlier and never reopened — publishKnownSlots), the remembered address
+  // is all there is, and publishing it is how that session reaches the other apps.
+  const live = await liveIdentityForSlot(slot);
+  if (live.open && live.email && !sameEmail(live.email, after)) {
+    log('publish skipped for slot ' + slot + ': window is signed in as ' + emailTag(live.email) +
+      ', not the remembered ' + emailTag(after));
+    return;
+  }
 
   const key = await getKey();
   if (!key) return;
@@ -320,17 +426,24 @@ async function publish(slot) {
   // on 11-02: a signed-out test profile took the stored personal session and landed on
   // Google's account chooser twice, while the user's own apps refused to share their working
   // copies because the dead one looked newer. Each app then needed its own sign-in.
-  const live = isLive(slot);
+  const windowLive = isLive(slot);
   try {
-    const existing = fs.readFileSync(storeFile(email));
+    const existing = fs.readFileSync(storeFile(after));
     const prior = JSON.parse(decrypt(key, existing));
-    if (sessionHash(prior.cookies || []) === hash) { syncedHash.set(email, hash); return; }
-    if (!live && sessionHash(prior.cookies || [])) return; // keep what is stored; ours is unproven
+    if (sessionHash(prior.cookies || []) === hash) { syncedHash.set(emailKey(after), hash); return; }
+    if (!windowLive && sessionHash(prior.cookies || [])) return; // keep what is stored; ours is unproven
   } catch (e) { /* no readable prior file; fall through and write */ }
+
+  // The address may have been rewritten during the awaits above (the live page's own
+  // detection lands on dom-ready). Those cookies were snapshotted under the old identity.
+  if (!sameEmail(after, ctx.emailForSlot(slot))) {
+    log('publish skipped for slot ' + slot + ': account address changed before write');
+    return;
+  }
 
   const payload = JSON.stringify({
     v: 1,
-    email,
+    email: after,
     updatedAt: Date.now(),
     cookies: cookies.map((c) => ({
       name: c.name, value: c.value, domain: c.domain, path: c.path,
@@ -339,17 +452,22 @@ async function publish(slot) {
     })),
   });
 
+  const dst = storeFile(after);
+  // Unique per write (pid + random), so two publishes for the same email — even
+  // concurrently in one process — never share a temp path and clobber each other's bytes
+  // before the atomic rename.
+  const tmp = dst + '.' + process.pid + '.' + crypto.randomBytes(4).toString('hex') + '.tmp';
   try {
     fs.mkdirSync(ctx.storeDir, { recursive: true, mode: 0o700 });
-    // Unique per write (pid + random), so two publishes for the same email — even
-    // concurrently in one process — never share a temp path and clobber each other's bytes
-    // before the atomic rename.
-    const tmp = storeFile(email) + '.' + process.pid + '.' + crypto.randomBytes(4).toString('hex') + '.tmp';
     fs.writeFileSync(tmp, encrypt(key, payload), { mode: 0o600 });
-    fs.renameSync(tmp, storeFile(email)); // atomic: a reader never sees a half-written file
-    syncedHash.set(email, hash);
-    log('published ' + (live ? 'working' : 'unconfirmed') + ' session for ' + email + ' (' + cookies.length + ' cookies)');
+    fs.renameSync(tmp, dst); // atomic: a reader never sees a half-written file
+    syncedHash.set(emailKey(after), hash);
+    log('published ' + (windowLive ? 'working' : 'unconfirmed') + ' session for ' + emailTag(after) +
+      ' (' + cookies.length + ' cookies)');
   } catch (e) {
+    // A failed rename (or write) would otherwise strand ciphertext in a temp file nothing
+    // ever reads. Best effort here; the startup sweep catches whatever this misses.
+    try { fs.unlinkSync(tmp); } catch (e2) { /* never created, or already renamed */ }
     log('publish failed: ' + (e && e.message));
   }
 }
@@ -363,13 +481,15 @@ async function readStored(email) {
   try { blob = fs.readFileSync(storeFile(email)); } catch (e) { return null; }
   try {
     const data = JSON.parse(decrypt(key, blob));
-    if (!data || data.email !== email || !Array.isArray(data.cookies)) return null;
+    // Case-insensitive: the publishing app may have recorded the same address in a different
+    // casing than this one reads from accounts.json.
+    if (!data || !Array.isArray(data.cookies) || !sameEmail(data.email, email)) return null;
     // A file an older build wrote from a signed-out window (see SIGNED_IN_NAMES) is not a
     // session; treat it as absent so the next real publish replaces it.
     if (!sessionHash(data.cookies)) return null;
     return data;
   } catch (e) {
-    log('stored session for ' + email + ' could not be decrypted — ignoring');
+    log('stored session ' + emailTag(email) + ' could not be decrypted — ignoring');
     return null;
   }
 }
@@ -507,8 +627,29 @@ const attemptedHash = new Map();
 // could pass the checks and inject.
 const adopting = new Set();
 
+// Auth navigations that arrived before the keyring probe resolved. `enabled` is false until
+// then, and dropping them would strand a slot that signed in during startup even though a
+// session is available the moment the probe says yes. Bounded: a pathological loop must not
+// grow it without limit.
+const pendingAuth = [];
+function notePendingAuth(slot, wc, target) {
+  if (pendingAuth.some((p) => p.slot === slot && p.wc === wc)) return;
+  if (pendingAuth.length >= 16) pendingAuth.shift();
+  pendingAuth.push({ slot, wc, target });
+}
+function drainPendingAuth() {
+  while (pendingAuth.length) {
+    const p = pendingAuth.shift();
+    adoptForAuth(p.slot, p.wc, p.target).catch(() => {});
+  }
+}
+
 async function adoptForAuth(slot, wc, target) {
-  if (!enabled || wc.isDestroyed() || adopting.has(slot)) return;
+  if (!ctx || !wc || wc.isDestroyed() || adopting.has(slot)) return;
+  if (!enabled) {
+    if (!initSettled) notePendingAuth(slot, wc, target); // replayed from init() once the probe ends
+    return;
+  }
   adopting.add(slot);
   try {
     const email = ctx.emailForSlot(slot);
@@ -518,6 +659,12 @@ async function adoptForAuth(slot, wc, target) {
 
     const data = await readStored(email);
     if (!data) return;
+    // The address can be rewritten while the reads above are in flight. Never graft a
+    // session onto a slot that has since been relabelled — that would sign in the wrong one.
+    if (!sameEmail(email, ctx.emailForSlot(slot))) {
+      log('adopt skipped for slot ' + slot + ': account address changed during adopt');
+      return;
+    }
     if (!wantsStored(local, data.cookies)) return; // ours is as recent; nothing to do
     const hash = sessionHash(data.cookies);
     if (attemptedHash.get(slot) === hash) return; // already tried this exact session — no loop
@@ -526,10 +673,12 @@ async function adoptForAuth(slot, wc, target) {
     if (sessionHash(local)) await clearAuthCookies(ses, local);
     const ok = await injectInto(ses, data.cookies);
     if (ok && !wc.isDestroyed()) {
-      syncedHash.set(email, hash);
-      log('adopted session for ' + email + ' into slot ' + slot + ' (' + ok + ' cookies) at sign-in');
+      syncedHash.set(emailKey(email), hash);
+      log('adopted session for ' + emailTag(email) + ' into slot ' + slot + ' (' + ok + ' cookies) at sign-in');
       resume(wc, target);
     }
+  } catch (e) {
+    log('adopt failed for slot ' + slot + ': ' + (e && e.message));
   } finally {
     adopting.delete(slot);
   }
@@ -566,33 +715,45 @@ function onStoreChanged() {
   watchTimer = setTimeout(async () => {
     watchTimer = null;
     if (!enabled) return;
-    for (const slot of activeSlots()) {
-      const email = ctx.emailForSlot(slot);
-      if (!email) continue;
-      const wins = ctx.windowsForSlot(slot)
-        .filter((w) => w && !w.isDestroyed() && isSignInUrl(w.webContents.getURL()));
-      if (!wins.length) continue;                      // no window here is signing in
-      const ses = session.fromPartition('persist:account-' + slot);
-      const local = await authCookies(ses);
-      const data = await readStored(email);
-      if (!data) continue;
-      if (!wantsStored(local, data.cookies)) continue; // ours is as recent
-      const hash = sessionHash(data.cookies);
-      if (attemptedHash.get(slot) === hash) continue;  // already tried this one here
-      if (sessionHash(local)) await clearAuthCookies(ses, local);
-      const injected = await injectInto(ses, data.cookies);
-      if (!injected) continue;
-      syncedHash.set(email, hash);
-      attemptedHash.set(slot, hash);
-      for (const w of wins) resume(w.webContents);
-      log('propagated session for ' + email + ' to slot ' + slot);
+    // setTimeout does not catch a rejected callback, so every await below lives under one
+    // guard: a transient read failure must not become an unhandled rejection.
+    try {
+      for (const slot of activeSlots()) {
+        const email = ctx.emailForSlot(slot);
+        if (!email) continue;
+        const wins = ctx.windowsForSlot(slot)
+          .filter((w) => w && !w.isDestroyed() && w.webContents && !w.webContents.isDestroyed() &&
+            isSignInUrl(w.webContents.getURL()));
+        if (!wins.length) continue;                      // no window here is signing in
+        const ses = session.fromPartition('persist:account-' + slot);
+        const local = await authCookies(ses);
+        const data = await readStored(email);
+        if (!data) continue;
+        // Same identity guard as publish/adopt: the slot may have been relabelled while the
+        // session was being read.
+        if (!sameEmail(email, ctx.emailForSlot(slot))) continue;
+        if (!wantsStored(local, data.cookies)) continue; // ours is as recent
+        const hash = sessionHash(data.cookies);
+        if (attemptedHash.get(slot) === hash) continue;  // already tried this one here
+        if (sessionHash(local)) await clearAuthCookies(ses, local);
+        const injected = await injectInto(ses, data.cookies);
+        if (!injected) continue;
+        syncedHash.set(emailKey(email), hash);
+        attemptedHash.set(slot, hash);
+        for (const w of wins) resume(w.webContents);
+        log('propagated session for ' + emailTag(email) + ' to slot ' + slot);
+      }
+    } catch (e) {
+      log('store-change handling failed: ' + (e && e.message));
     }
   }, 800);
 }
 
 function activeSlots() {
   const slots = [];
-  for (let n = 1; n <= 50; n++) if (ctx.windowsForSlot(n).some((w) => w && !w.isDestroyed())) slots.push(n);
+  for (let n = 1; n <= WINDOW_SLOTS; n++) {
+    if (ctx.windowsForSlot(n).some((w) => w && !w.isDestroyed())) slots.push(n);
+  }
   return slots;
 }
 
@@ -614,31 +775,98 @@ function attachSlot(slot) {
   });
 }
 
+let storeWatcher = null;
+let storeWatchRetry = null;
+let storeWatchFailures = 0;
+
+function scheduleWatchRetry() {
+  if (storeWatchRetry || storeWatchFailures++ >= 5) return;
+  storeWatchRetry = setTimeout(() => { storeWatchRetry = null; startWatching(); }, 5000);
+}
+
 // storeDir is watched (not individual files) so newly-created identity files are seen too.
 function startWatching() {
+  if (storeWatcher) return;
   try {
     fs.mkdirSync(ctx.storeDir, { recursive: true, mode: 0o700 });
-    fs.watch(ctx.storeDir, () => onStoreChanged());
+    storeWatcher = fs.watch(ctx.storeDir, () => onStoreChanged());
+    // An unhandled 'error' on a watcher is fatal to the process, and a watcher that errored
+    // is dead. Close it and retry a few times: without this, one transient inotify failure
+    // silently stopped cross-app propagation until the next restart.
+    storeWatcher.on('error', (e) => {
+      log('store watcher error: ' + (e && e.message));
+      try { storeWatcher.close(); } catch (e2) { /* already dead */ }
+      storeWatcher = null;
+      scheduleWatchRetry();
+    });
+    storeWatchFailures = 0;
   } catch (e) {
     log('cannot watch store dir: ' + (e && e.message));
+    scheduleWatchRetry();
   }
+}
+
+// A temp file is left only when a publish died between write and rename. It is ciphertext
+// nothing will ever read, so clear old ones at startup instead of letting them accumulate.
+function sweepStaleTemps() {
+  try {
+    const now = Date.now();
+    for (const f of fs.readdirSync(ctx.storeDir)) {
+      if (!f.endsWith('.tmp')) continue;
+      const p = path.join(ctx.storeDir, f);
+      try { if (now - fs.statSync(p).mtimeMs > 60 * 60 * 1000) fs.unlinkSync(p); } catch (e) { /* gone */ }
+    }
+  } catch (e) { /* store dir not created yet — nothing to sweep */ }
+}
+
+// Drop stored sessions for addresses no slot claims any more. Bounded by ACCOUNT_SLOTS, not
+// WINDOW_SLOTS: the store and accounts.json are shared, so a single-account app must not
+// prune the sessions belonging to its siblings' slots. Only files older than a month are
+// touched, because accounts.json is a cache that can lag a sign-in in another app, and the
+// live cookie jars are never modified — the worst case is one app re-signing in.
+const PRUNE_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+function pruneOrphanedSessions() {
+  const known = new Set();
+  for (let n = 1; n <= ACCOUNT_SLOTS; n++) {
+    const email = ctx.emailForSlot(n);
+    if (email) known.add(emailHashHex(email));
+  }
+  let pruned = 0;
+  try {
+    const now = Date.now();
+    for (const f of fs.readdirSync(ctx.storeDir)) {
+      if (!f.endsWith('.enc')) continue;
+      if (known.has(f.slice(0, -4))) continue;
+      const p = path.join(ctx.storeDir, f);
+      try {
+        if (now - fs.statSync(p).mtimeMs > PRUNE_AGE_MS) { fs.unlinkSync(p); pruned++; }
+      } catch (e) { /* gone */ }
+    }
+  } catch (e) { /* no store dir */ }
+  if (pruned) log('pruned ' + pruned + ' orphaned session store(s)');
 }
 
 // Called from main once, after app.setName (so appData/userData paths are settled). The
 // keyring probe decides whether the feature runs at all.
 async function init(context) {
   ctx = context;
+  sweepStaleTemps();
   const key = await getKey();
   enabled = !!key;
+  initSettled = true;
   if (!enabled) {
     // No working keyring on this machine — the honest outcome of "we can't know the
     // capabilities": the feature turns itself off rather than storing a session in the clear.
+    pendingAuth.length = 0; // nothing will ever replay these
     log('no working keyring backend (tried ' + KEYRING_BACKENDS.map((b) => b.name).join(', ') +
       ') — single sign-on across apps is off; each app signs in on its own');
     return;
   }
+  pruneOrphanedSessions();
   startWatching();
   log('ready (keyring: ' + keyBackendName + ')');
+  // Sign-ins that reached Google while the keyring probe was still running.
+  drainPendingAuth();
   app.whenReady().then(publishKnownSlots).catch(() => {});
 }
 
@@ -651,7 +879,7 @@ async function init(context) {
 // known email are touched: those are the ones that have been signed into, so this never
 // conjures a partition for an unused slot.
 async function publishKnownSlots() {
-  for (let n = 1; n <= 50; n++) {
+  for (let n = 1; n <= WINDOW_SLOTS; n++) {
     if (!ctx.emailForSlot(n)) continue;
     attachSlot(n); // and keep publishing it as Google rotates the session
     await publish(n);

@@ -16,13 +16,17 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$DIR"
 
 # This script builds macOS .app bundles. On Linux the packaging, install layout and
-# desktop integration are entirely different, so hand off to the Linux builder.
+# desktop integration are entirely different, so hand off to the Linux builder. Run it
+# rather than exec-ing it, so this script exits through its normal path with its status.
 if [ "$(uname -s)" != "Darwin" ]; then
-  exec "$DIR/build-linux.sh" "$@"
+  bash "$DIR/build-linux.sh" "$@"
+  exit $?
 fi
 
 # Build for the host architecture so the apps run natively on Apple Silicon (arm64)
-# or Intel (x86_64 -> x64). Override by exporting ARCH=universal for a fat binary.
+# or Intel (x86_64 -> x64). Only those two are supported: the Electron zip is fetched for
+# ARCH below, and a universal build would need both a darwin-x64 and a darwin-arm64
+# download, which this script does not do.
 ARCH="${ARCH:-$([ "$(uname -m)" = "x86_64" ] && echo x64 || echo arm64)}"
 
 . "$DIR/services.conf"
@@ -31,7 +35,7 @@ ARCH="${ARCH:-$([ "$(uname -m)" = "x86_64" ] && echo x64 || echo arm64)}"
 # ensure_prereqs(): what the build and the apps need, offered for install if missing.
 . "$DIR/prereqs.sh"
 
-usage() { sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,13p' "$DIR/$(basename "${BASH_SOURCE[0]}")" | sed 's/^# \{0,1\}//'; }
 
 WANTED=()
 while [ "$#" -gt 0 ]; do
@@ -70,12 +74,25 @@ fi
 # of ELECTRON_CUSTOM_* vars that gets both requests right. Bypass the whole path:
 # fetch the castlabs zip once ourselves, stage it under the plain-version name that
 # packager expects, and pass --electron-zip-dir. That skips @electron/get's download
-# and checksum steps entirely; the resolved tag is the integrity check.
+# and checksum steps, so this script verifies the archive against the checksums the
+# electron package publishes (node_modules/electron/checksums.json) before staging it.
 #
 # Runs AFTER argparse, deliberately: --list and --help must not require node or
 # network, and the earlier revision of this block sat at the top of the file where
 # every invocation paid for it whether it needed to build anything or not.
-ELECTRON_VER=$(node -p "require('./package.json').devDependencies.electron.split('#v')[1].split('+')[0]")
+# The Electron pin MUST be the castlabs fork: stock Electron ships no Widevine CDM. A plain
+# registry version here would silently replace it, so fail with a sentence rather than the
+# TypeError a naive split('#v') throws when package.json has any other shape.
+ELECTRON_VER="$(node -e '
+const pin = (require("./package.json").devDependencies || {}).electron || "";
+const m = /^github:castlabs\/electron-releases#v([^+]+)\+wvcus$/.exec(pin);
+if (!m) {
+  console.error("package.json must pin electron to the castlabs fork, e.g. " +
+    "\"electron\": \"github:castlabs/electron-releases#v42.8.0+wvcus\"; found: " + JSON.stringify(pin));
+  process.exit(1);
+}
+process.stdout.write(m[1]);
+')" || { echo "==> Could not read the castlabs Electron pin from package.json." >&2; exit 1; }
 ELECTRON_ZIP_DIR="${ELECTRON_ZIP_DIR:-${XDG_CACHE_HOME:-$HOME/Library/Caches}/electron-apps}"
 mkdir -p "$ELECTRON_ZIP_DIR"
 # See build-linux.sh: the cache used to be keyed "linux-google-apps" — a Linux-flavoured
@@ -98,14 +115,49 @@ fi
 STAGED_ZIP="$ELECTRON_ZIP_DIR/electron-v${ELECTRON_VER}+wvcus-darwin-${ARCH}.zip"
 if [ ! -s "$STAGED_ZIP" ]; then
   # ELECTRON_ZIP_URL fully overrides for an internal mirror; ELECTRON_MIRROR still
-  # works as the base if someone had already set it. Neither is required.
-  URL="${ELECTRON_ZIP_URL:-${ELECTRON_MIRROR:-https://github.com/castlabs/electron-releases/releases/download/}v${ELECTRON_VER}+wvcus/electron-v${ELECTRON_VER}+wvcus-darwin-${ARCH}.zip}"
+  # works as the base if someone had already set it. Neither is required. A mirror is a
+  # BASE URL, so join it with exactly one slash whether or not it was given one.
+  MIRROR="${ELECTRON_MIRROR:-https://github.com/castlabs/electron-releases/releases/download/}"
+  URL="${ELECTRON_ZIP_URL:-${MIRROR%/}/v${ELECTRON_VER}+wvcus/electron-v${ELECTRON_VER}+wvcus-darwin-${ARCH}.zip}"
   echo "==> Downloading Electron $ELECTRON_VER+wvcus (darwin-$ARCH)"
-  curl -fSL --retry 3 -o "$STAGED_ZIP.part" "$URL"
-  mv "$STAGED_ZIP.part" "$STAGED_ZIP"
+  part="$(mktemp "$ELECTRON_ZIP_DIR/.dl.XXXXXX")"
+  # The partial download is removed on any exit, including an abort below.
+  trap 'rm -f "$part"' EXIT INT TERM HUP PIPE
+  # --proto '=https' plus --tlsv1.2 keeps a mirror or redirect from silently downgrading
+  # the transport the archive is fetched over.
+  curl -fSL --proto '=https' --tlsv1.2 --retry 3 -o "$part" "$URL"
+  # A truncated download, or an HTML error page saved under a .zip name, must never be
+  # staged as if it were a usable Electron build.
+  unzip -tq "$part" >/dev/null
+  # Bypassing @electron/get also skipped its checksum step. When the installed electron
+  # package publishes castlabs' checksums, require the archive to match the pin. A missing
+  # entry means this platform/arch is not one the pinned release publishes.
+  CHECKSUMS="$DIR/node_modules/electron/checksums.json"
+  if [ -f "$CHECKSUMS" ]; then
+    zip_name="electron-v${ELECTRON_VER}+wvcus-darwin-${ARCH}.zip"
+    expected="$(node -e 'const c=require(process.argv[1]); process.stdout.write(c[process.argv[2]] || "")' "$CHECKSUMS" "$zip_name")"
+    if [ -z "$expected" ]; then
+      echo "    no SHA-256 for $zip_name in $CHECKSUMS — this platform/arch may not be published for the pinned Electron" >&2
+      exit 1
+    fi
+    actual="$(node -e 'const c=require("crypto"),f=require("fs"); process.stdout.write(c.createHash("sha256").update(f.readFileSync(process.argv[1])).digest("hex"))' "$part")"
+    if [ "$actual" != "$expected" ]; then
+      echo "    SHA-256 mismatch for $URL" >&2
+      echo "      expected $expected" >&2
+      echo "      got      $actual" >&2
+      exit 1
+    fi
+  fi
+  mv "$part" "$STAGED_ZIP"
+  trap - EXIT INT TERM HUP PIPE
 fi
 
-rm -rf build && mkdir -p build
+# build/ and app-config.json are this run's scratch output. Clean them from an EXIT trap so
+# a `set -e` abort partway through the loop removes them too, not only a finished build.
+cleanup_build() { rm -rf "$DIR/build" "$DIR/app-config.json"; }
+trap cleanup_build EXIT INT TERM HUP PIPE
+rm -rf "$DIR/build" "$DIR/app-config.json"
+mkdir -p "$DIR/build"
 for entry in "${SELECTED[@]}"; do
   IFS='|' read -r name icon url bid categories related drm paths handlers single <<< "$entry"
   echo "==> Building $name"
@@ -121,13 +173,18 @@ for entry in "${SELECTED[@]}"; do
     --electron-zip-dir="$ELECTRON_ZIP_DIR" \
     "${IGNORE_FLAGS[@]}" \
     --out="$DIR/build" --overwrite >/dev/null
+  mkdir -p "$HOME/Applications"
   rm -rf "$HOME/Applications/$name.app"
   cp -R "$DIR/build/$name-darwin-$ARCH/$name.app" "$HOME/Applications/"
   # By absolute path: a Homebrew or pip `xattr` earlier on PATH has no -r, fails the whole
   # step, and prints its usage to stdout, which the 2>/dev/null does not hide.
   /usr/bin/xattr -dr com.apple.quarantine "$HOME/Applications/$name.app" 2>/dev/null || true
-  codesign --force --deep --sign - "$HOME/Applications/$name.app" >/dev/null 2>&1
+  # An unsigned bundle is refused by Gatekeeper on current macOS, so a failed codesign is a
+  # failed install -- say so instead of reporting "installed + signed".
+  codesign --force --deep --sign - "$HOME/Applications/$name.app" >/dev/null 2>&1 \
+    || { echo "    codesign failed for $name.app — it will not launch on current macOS" >&2; exit 1; }
   echo "    installed + signed: ~/Applications/$name.app"
 done
-rm -rf build app-config.json
+cleanup_build
+trap - EXIT INT TERM HUP PIPE
 echo "==> Done. Launch from ~/Applications (or Spotlight)."

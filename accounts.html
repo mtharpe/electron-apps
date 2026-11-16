@@ -66,6 +66,11 @@
   }
   button.primary { background: var(--accent); color: var(--accent-fg); border-color: transparent; }
   button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  /* The caption names the table for assistive tech without adding visual chrome. */
+  .sr-only {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+  }
 </style>
 </head>
 <body>
@@ -77,6 +82,7 @@
   </p>
 
   <table>
+    <caption class="sr-only">Account names and Chrome profiles</caption>
     <thead>
       <tr>
         <th class="slot">#</th>
@@ -126,6 +132,7 @@
       name.value = slot.name;
       name.dataset.slot = slot.n;
       name.className = 'name';
+      name.setAttribute('aria-label', 'Name for account ' + slot.n);
       // The placeholder shows what the title falls back to, so a blank field is not a blank
       // window title — it is "whatever the mapped profile is called".
       name.placeholder = slot.resolvedProfile || ('Account ' + slot.n);
@@ -136,6 +143,7 @@
       const select = document.createElement('select');
       select.dataset.slot = slot.n;
       select.className = 'profile';
+      select.setAttribute('aria-label', 'Chrome profile for account ' + slot.n);
       const auto = new Option('Auto (detect)', AUTO);
       select.add(auto);
       for (const p of data.profiles) {
@@ -180,10 +188,15 @@
   }
 
   function collect() {
+    // Send the values this window was rendered with alongside the current ones. Main uses
+    // them to tell an untouched row from an edit: without that, a save would rewrite a row
+    // a sibling app changed on disk after this window loaded, reverting it.
     return slots.map((slot) => ({
       n: slot.n,
       name: document.querySelector('input.name[data-slot="' + slot.n + '"]').value,
       chromeProfile: document.querySelector('select.profile[data-slot="' + slot.n + '"]').value,
+      origName: typeof slot.name === 'string' ? slot.name : '',
+      origProfile: typeof slot.chromeProfile === 'string' ? slot.chromeProfile : '',
     }));
   }
 

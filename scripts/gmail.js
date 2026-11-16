@@ -18,8 +18,10 @@
  * (j/k), with nothing checked or open — the toolbar hides the button then. That cursor
  * exists only when shortcuts are on, which is also when "#" works, so "#" covers it.
  *
- * Anywhere text can be edited, Delete is left completely alone: the decision is made
- * synchronously on the key event itself, so no keystroke is ever delayed or reordered.
+ * Anywhere text can be edited, Delete is left completely alone, and so is any focused control
+ * (a toolbar or compose button, a link): Delete there belongs to that control, not to the
+ * conversation showing behind it. The decision is made synchronously on the key event itself,
+ * so no keystroke is ever delayed or reordered.
  */
 (function () {
   'use strict';
@@ -30,11 +32,38 @@
     const tag = el.tagName;
     if (tag === 'TEXTAREA' || tag === 'SELECT') return true;
     if (tag === 'INPUT') {
-      // A checkbox or button has focus but no text for Delete to act on — Gmail's own row
-      // checkboxes are among these, and Delete there should still delete the conversation.
+      // A checkbox or button has no text for Delete to act on. It is not a text entry point;
+      // whether Delete may act at all is decided by inDeleteContext() below.
       return !/^(checkbox|radio|button|submit|reset|image|file|color|range)$/i.test(el.type);
     }
     return /^(textbox|searchbox|combobox|spinbutton)$/.test(el.getAttribute('role') || '');
+  };
+
+  // A focused control means Delete belongs to that control, not to the conversation showing
+  // behind it: compose's Send, a toolbar action, the account switcher. It is not a text entry
+  // point, so isEditable() deliberately lets it through -- this is what stops Delete from
+  // trashing the open or selected conversation when the key was aimed at the control.
+  const CONTROL_ROLE = /^(button|link|menuitem|menuitemcheckbox|menuitemradio|tab|switch|option|combobox)$/;
+
+  const isControl = (el) => {
+    if (el.tagName === 'BUTTON' || el.tagName === 'A') return true;
+    const role = el.getAttribute('role') || '';
+    if (CONTROL_ROLE.test(role)) return true;
+    // The row checkbox is the selection itself, so Delete still means "delete the selected
+    // conversation". A checkbox anywhere else is a control with its own behaviour.
+    if (role === 'checkbox' || role === 'radio') return !el.closest('[role="grid"]');
+    return false;
+  };
+
+  // Delete is only meaningful in the message list or the reading pane. Focus anywhere else --
+  // a compose dialog, a toolbar, a menu -- is someone else's key event.
+  const inDeleteContext = (el) => {
+    // Nothing focused, or the document itself: Gmail's j/k keyboard cursor lives here, which
+    // is the case this script exists for.
+    if (!el || el.nodeType !== 1 || el === document.body || el === document.documentElement) return true;
+    if (isControl(el)) return false;
+    if (el.closest('[role="dialog"], [role="toolbar"], [role="menu"]')) return false;
+    return !!el.closest('[role="main"], [role="grid"]');
   };
 
   // Gmail keeps a toolbar per view and hides the inactive ones, so the visible button is the
@@ -67,6 +96,7 @@
     if (e.key !== 'Delete' || !e.isTrusted || e.defaultPrevented) return;
     if (e.ctrlKey || e.altKey || e.metaKey || e.shiftKey) return;
     if (e.composedPath().some(isEditable) || isEditable(document.activeElement)) return;
+    if (!inDeleteContext(document.activeElement)) return;
 
     e.preventDefault();
     e.stopImmediatePropagation();
