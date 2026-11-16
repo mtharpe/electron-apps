@@ -30,7 +30,7 @@ desktop app, is what most of `lib/` and `preload.js` are for.
 | `prereqs.sh` | `ensure_prereqs`: checks node/npm/curl/python3 (required) and rsvg-convert + a keyring client (optional), and offers to install what is missing via the system package manager — asks first; `INSTALL_PREREQS=1`/`0` to decide in scripts. Image-based hosts get the command instead. Shared by both installers. |
 | `build-linux.sh` | Linux: package, install under `$PREFIX`, write `.desktop` + icon ladder, resolve the icon theme. |
 | `build.sh` | macOS: package, install to `~/Applications`, ad-hoc codesign. Dispatches to `build-linux.sh` on Linux. |
-| `main.js` | Entry point only: creates the windows, wires the modules together, owns the app lifecycle. ~393 lines. |
+| `main.js` | Entry point only: creates the windows, wires the modules together, owns the app lifecycle. ~572 lines. |
 | `lib/config.js` | This app's identity, read from `app-config.json`. `ROOT` is here — modules under `lib/` must resolve bundled files against it, not `__dirname`. |
 | `lib/util.js` | `wait`, `logRecovery`, `hasSuffix`, `pathUnder`. Depends on nothing. |
 | `lib/window-registry.js` | Owns the slot→window map and the Accounts window. Depends on nothing — that is the point; it is what keeps theme/accounts/recovery from requiring each other. |
@@ -42,7 +42,8 @@ desktop app, is what most of `lib/` and `preload.js` are for.
 | `lib/handlers.js` | Link schemes the app takes over, from `services.conf`'s `handlers` field (`mailto:` for Gmail). Resolves a scheme to an in-app URL; `openHandled`/`openWindow` open it, through an opener `main.js` registers so `routing.js` can use it without requiring `main.js`. |
 | `lib/notifications.js` | Native notifications and the web-notification mirror. |
 | `lib/recovery.js` | Retry after a failed navigation; reload after the machine wakes. |
-| `lib/window-restore.js` | Which account windows open at launch: "Open at launch" slots plus, while Reopen is on, the last session's. Per app, in `<userData>/restore.json` — not the shared `accounts.json`. |
+| `lib/window-restore.js` | Which account windows open at launch: "Open at launch" slots plus, while Reopen is on, the last session's. Per app, in `<userData>/restore.json` — not the shared `accounts.json`. Also persists each slot's zoom (and bounds, as a fallback when `window-place` has no record). |
+| `lib/window-place.js` | Monitor-aware window placement (X11 only): remembers the display and bounds per slot in `<userData>/window-place.json`; on Wayland the desktop positions windows and this only records. |
 | `lib/page-tweaks.js` | Per-webContents page adjustments: custom CSS, window title, context menu. |
 | `lib/menu.js` | The application menu. |
 | `preload.js` | Runs in the page's main world: the stealth layer + notification mirror. |
