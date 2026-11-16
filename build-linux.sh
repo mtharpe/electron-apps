@@ -63,7 +63,9 @@ if [ -n "${ELECTRON_APPS_EXEC_ENV:-}" ]; then
       exit 1
       ;;
   esac
-  EXEC_ENV="$ELECTRON_APPS_EXEC_ENV "
+  # Desktop entries have no inline `VAR=value command` form: the assignments must be
+  # executed, so write them through `env`.
+  EXEC_ENV="env $ELECTRON_APPS_EXEC_ENV "
 fi
 
 APPS_DIR="$PREFIX/share/applications"
