@@ -558,7 +558,29 @@ Scripts must stay **bash 3.2 compatible** (macOS still ships it): no associative
 
 ---
 
-## Debugging playbook
+## Memory
+
+Each app is its own Electron process tree — roughly **200–300 MB resident** with one window
+(most of it Chromium's main/GPU/utility/zygote processes; the page's JS heap is usually only
+tens of MB). An extra account window adds a renderer, about **70–125 MB**. The app itself
+keeps only bounded state (notification `live`/`shown` caps, viewer maps, per-slot hashes), so
+memory growth over a long session is page-side, not ours.
+
+Two opt-ins, both **off by default**:
+
+- `ELECTRON_APPS_MEMORY_LOG=1` — log resident-memory totals (and a per-process-type
+  breakdown) to the journal 5 s after startup and every 10 minutes.
+- `ELECTRON_APPS_IDLE_RELOAD_MIN=N` — reload an account window that has been minimized/hidden
+  and unfocused for N minutes, reclaiming accumulated page memory. It skips audible windows
+  and anything not on the app's own URL; reloading resets page state.
+
+Measured on this host: Messenger and Google Messages each ~220 MB RSS; the container debug
+build ~290 MB PSS. `--enable-low-end-device-mode` saved ~8 MB; `--js-flags=--max-old-space-size`
+changed nothing; `--enable-features=NetworkServiceInProcess` was ~140 MB *worse*. Fewer
+windows/apps and occasional idle reloads are the real levers.
+
+---
+
 
 | Symptom | First thing to check |
 |---|---|

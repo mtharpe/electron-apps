@@ -17,6 +17,7 @@ const sessionSync = require('./session-sync');
 const windowPlace = require('./lib/window-place');
 const { APP_NAME, APP_URL, APP_HOST, APP_ICON, IS_MAC, ACCOUNTS_DIR } = require('./lib/config');
 const { logRecovery } = require('./lib/util');
+const { createIdleReloader } = require('./lib/idle-reload');
 const { windows, focusWindow, getAccountsWindow, setAccountsWindow } = require('./lib/window-registry');
 const { CHROME_UA, STEALTH_WEBPREFS, spoofSession, whenWidevineReady } = require('./lib/chromium');
 const {
@@ -48,6 +49,61 @@ const { buildMenu } = menu;
 
 // How long a new window waits for a first frame before it is shown anyway.
 const REVEAL_DEADLINE_MS = 4000;
+
+// Memory controls, both opt-in (default off).
+//   ELECTRON_APPS_MEMORY_LOG=1        log resident memory totals to the journal
+//   ELECTRON_APPS_IDLE_RELOAD_MIN=N   reload a hidden account window idle for N minutes
+const IDLE_RELOAD_MIN = (() => {
+  const n = Number(process.env.ELECTRON_APPS_IDLE_RELOAD_MIN);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+})();
+const IDLE_RELOAD_MS = IDLE_RELOAD_MIN * 60000;
+const IDLE_CHECK_MS = IDLE_RELOAD_MS
+  ? Math.max(1000, Math.min(60000, IDLE_RELOAD_MS / 2))
+  : 60000;
+const MEMORY_LOG = process.env.ELECTRON_APPS_MEMORY_LOG === '1';
+
+const idleReloader = createIdleReloader({
+  windows,
+  appUrl: APP_URL,
+  idleMs: IDLE_RELOAD_MS,
+  log: logRecovery,
+});
+
+function logMemoryUsage() {
+  try {
+    const procs = app.getAppMetrics();
+    let total = 0;
+    const by = {};
+    for (const p of procs) {
+      const mem = p.memory || {};
+      // Electron 42 reports workingSetSize (KB); older/newer shapes use residentSet or
+      // private+shared. Accept whichever this build provides.
+      const kb = typeof mem.workingSetSize === 'number' ? mem.workingSetSize
+        : typeof mem.residentSet === 'number' ? mem.residentSet
+          : (mem.private || 0) + (mem.shared || 0);
+      total += kb;
+      const kind = p.type || 'other';
+      by[kind] = (by[kind] || 0) + kb;
+    }
+    const parts = Object.keys(by).sort().map((k) => k + ' ' + Math.round(by[k] / 1024) + 'MB');
+    logRecovery('memory: ' + Math.round(total / 1024) + ' MB total (' + parts.join(', ') + ')');
+  } catch (e) { /* metrics unavailable; never fatal */ }
+}
+
+function startMemoryReporting() {
+  if (!MEMORY_LOG) return;
+  const first = setTimeout(logMemoryUsage, 5000);
+  if (first.unref) first.unref();
+  const timer = setInterval(logMemoryUsage, 10 * 60 * 1000);
+  if (timer.unref) timer.unref();
+}
+
+function startIdleReloadWatcher() {
+  if (!IDLE_RELOAD_MS) return;
+  const timer = setInterval(() => idleReloader.maybeReload(), IDLE_CHECK_MS);
+  if (timer.unref) timer.unref();
+}
 
 app.on('web-contents-created', (e, wc) => {
   applyCustomStyles(wc);
@@ -131,6 +187,8 @@ function openAccountWindow(n) {
 
   if (wantMaximized) win.maximize();
   windows.set(n, win);
+  idleReloader.noteWindow(win);
+  win.on('focus', () => idleReloader.noteFocus(win));
   noteWindowOpened(n);
   // Publish this slot's session once its page is up. The cookie-'changed' listener in
   // session-sync only fires on an interactive login or a rotation — cookies restored from
@@ -503,6 +561,8 @@ if (!gotSingleInstanceLock) {
     const launchLink = handoff.linkFromArgv(process.argv, isFirstPartyUrl);
     if (launchLink) openHandedLink(launchLink);
     handoff.register();
+    startMemoryReporting();
+    startIdleReloadWatcher();
 
     // On the very first launch, fire one native notification so the OS registers this app
     // with its notification settings (macOS only lists apps under System Settings →
