@@ -570,13 +570,12 @@ Two opt-ins, both **off by default**:
 
 - `ELECTRON_APPS_MEMORY_LOG=1` — log resident-memory totals (and a per-process-type
   breakdown) to the journal 5 s after startup and every 10 minutes.
-- `ELECTRON_APPS_IDLE_RELOAD_MIN=N` — reload an account window that has been minimized/hidden
-  and unfocused for N minutes, reclaiming accumulated page memory. It skips audible windows
-  and anything not on the app's own URL; reloading resets page state.
-- **Do not enable idle reload on notification-critical apps** (Google Messages, Messenger).
-  Reloading resets Messenger's chat-list watcher baseline, so a message arriving around the
-  reload can miss its banner, and Messages can miss one during the reconnect. Use it only
-  where memory matters more than an occasional missed notification.
+- `ELECTRON_APPS_IDLE_RELOAD_MIN=N` — when an account window has been minimized/hidden and
+  unfocused for N minutes, load the app's home page again. It skips audible windows and
+  anything not on the app's own URL, returns to a known-good URL, and lets the load-recovery
+  layer retry a failure — so the window comes straight back rather than staying down. A
+  notification that arrives during the reload can still be missed (Messenger's chat-list
+  watcher re-baselines), so use a long interval on notification-critical apps.
 - To bake both into menu launches, build with
   `ELECTRON_APPS_EXEC_ENV="ELECTRON_APPS_MEMORY_LOG=1 ELECTRON_APPS_IDLE_RELOAD_MIN=60" ./build-linux.sh`;
   it becomes an `env …` prefix in the `.desktop` `Exec=` line (a rebuild otherwise rewrites
