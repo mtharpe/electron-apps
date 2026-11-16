@@ -334,7 +334,9 @@ ipcMain.handle('accounts:save', (event, incoming, launch) => {
     accounts.set(n, Object.assign({}, current, { name, chromeProfile: profile }));
     touched.push(n);
   }
-  if (touched.length > 0) persistSlots(touched);
+  let saved = true;
+  if (touched.length > 0) saved = persistSlots(touched);
+  if (!saved) logRecovery('accounts save: file lock busy; kept in memory until the next save');
   // Startup choices are this app's own (window-restore.js), not the shared accounts.json.
   if (launch && typeof launch === 'object') {
     if (Array.isArray(launch.slots)) setLaunchSlots(launch.slots.map(Number));
@@ -343,7 +345,7 @@ ipcMain.handle('accounts:save', (event, incoming, launch) => {
   // Fires the onChanged -> buildMenu callback itself; a second explicit buildMenu() here
   // rebuilt the whole menu twice per save.
   refreshAccountPresentation();
-  return true;
+  return saved;
 });
 
 ipcMain.on('accounts:close', (event) => {
@@ -391,7 +393,7 @@ if (!gotSingleInstanceLock) {
     },
     loadHome: (wc) => wc.loadURL(APP_URL, { userAgent: CHROME_UA }).catch(() => {}),
     log: logRecovery,
-  });
+  }).catch((e) => logRecovery('session-sync init failed: ' + (e && e.message)));
   loadThemePreference();
   loadRestoreState();
   applyColorScheme();

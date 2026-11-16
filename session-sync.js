@@ -338,10 +338,6 @@ async function authCookies(ses) {
   return (await ses.cookies.get({})).filter((c) => isAuthCookieHost(c.domain));
 }
 
-async function hasSession(ses) {
-  return !!sessionHash(await authCookies(ses));
-}
-
 // Ask an open slot window who it is actually signed in as. accounts.json holds what was
 // detected at some past load; the window's jar can be signed into a different account by now.
 const LIVE_IDENTITY_JS = `(function(){
@@ -640,11 +636,11 @@ function notePendingAuth(slot, wc, target) {
 function drainPendingAuth() {
   while (pendingAuth.length) {
     const p = pendingAuth.shift();
-    adoptForAuth(p.slot, p.wc, p.target).catch(() => {});
+    adoptForAuth(p.slot, p.wc, p.target, true).catch(() => {});
   }
 }
 
-async function adoptForAuth(slot, wc, target) {
+async function adoptForAuth(slot, wc, target, deferred) {
   if (!ctx || !wc || wc.isDestroyed() || adopting.has(slot)) return;
   if (!enabled) {
     if (!initSettled) notePendingAuth(slot, wc, target); // replayed from init() once the probe ends
@@ -656,6 +652,10 @@ async function adoptForAuth(slot, wc, target) {
     if (!email) return;
     const ses = session.fromPartition('persist:account-' + slot);
     const local = await authCookies(ses);
+    // A replayed navigation may be stale: the keyring probe can take tens of seconds, and the
+    // user may have finished signing in meanwhile. A local session now means the sign-in
+    // already succeeded -- adopting a stored one would discard it (and could be the wrong one).
+    if (deferred && sessionHash(local)) return;
 
     const data = await readStored(email);
     if (!data) return;
