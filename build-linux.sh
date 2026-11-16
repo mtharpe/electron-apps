@@ -52,6 +52,20 @@ case "$PREFIX" in
   *) echo "PREFIX must be an absolute path: $PREFIX" >&2; exit 1 ;;
 esac
 
+# Optional `env VAR=value ...` prefix for the .desktop Exec line, so launches from the app
+# menu carry settings (the memory controls, for example). Written into a desktop entry, so
+# reject the characters that would break that line.
+EXEC_ENV=""
+if [ -n "${ELECTRON_APPS_EXEC_ENV:-}" ]; then
+  case "$ELECTRON_APPS_EXEC_ENV" in
+    *$'\n'*|*$'\r'*|*%*)
+      echo "ELECTRON_APPS_EXEC_ENV must not contain a newline, CR or '%'" >&2
+      exit 1
+      ;;
+  esac
+  EXEC_ENV="$ELECTRON_APPS_EXEC_ENV "
+fi
+
 APPS_DIR="$PREFIX/share/applications"
 ICONS_DIR="$PREFIX/share/icons/hicolor"
 
@@ -655,7 +669,7 @@ for entry in "${SELECTED[@]}"; do
     printf 'Version=1.1\n'
     printf 'Name=%s\n' "$name"
     printf 'Comment=%s as a standalone app\n' "$name"
-    printf 'Exec=%s %%U\n' "$exec_q"
+    printf 'Exec=%s%s %%U\n' "$EXEC_ENV" "$exec_q"
     printf 'Icon=%s\n' "$slug"
     printf 'Terminal=false\n'
     printf 'Categories=%s\n' "$categories"

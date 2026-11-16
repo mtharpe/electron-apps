@@ -573,6 +573,10 @@ Two opt-ins, both **off by default**:
 - `ELECTRON_APPS_IDLE_RELOAD_MIN=N` — reload an account window that has been minimized/hidden
   and unfocused for N minutes, reclaiming accumulated page memory. It skips audible windows
   and anything not on the app's own URL; reloading resets page state.
+- To bake both into menu launches, build with
+  `ELECTRON_APPS_EXEC_ENV="ELECTRON_APPS_MEMORY_LOG=1 ELECTRON_APPS_IDLE_RELOAD_MIN=60" ./build-linux.sh`;
+  it becomes an `env …` prefix in the `.desktop` `Exec=` line (a rebuild otherwise rewrites
+  that file without it).
 
 Measured on this host: Messenger and Google Messages each ~220 MB RSS; the container debug
 build ~290 MB PSS. `--enable-low-end-device-mode` saved ~8 MB; `--js-flags=--max-old-space-size`
