@@ -513,7 +513,9 @@ if (!gotSingleInstanceLock) {
       if (!fs.existsSync(marker) && Notification.isSupported()) {
         // Via showNotificationFor so the object is held in `live` until clicked/closed;
         // a bare Notification here left the banner up but dropped its activation.
-        showNotificationFor(null, { title: APP_NAME, body: APP_NAME + ' notifications are enabled.' }, 'first-run');
+        // Pass Account 1's window (if open) so clicking the banner raises it rather than
+        // logging "no window left to focus" — this is the first banner a user tries.
+        showNotificationFor(windows.get(1) || null, { title: APP_NAME, body: APP_NAME + ' notifications are enabled.' }, 'first-run');
         fs.writeFileSync(marker, '1');
       }
     } catch (e) { /* non-fatal */ }
