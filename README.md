@@ -775,6 +775,15 @@ and hands control back to Google (pushing them out to the external browser would
 login). The major IdPs are recognized out of the box: **Okta, Microsoft Entra ID / Azure AD,
 Ping Identity, OneLogin, Duo, Auth0, JumpCloud, CyberArk**.
 
+Anyone can open a tenant on those domains (`evil.okta.com`), so a built-in IdP is kept in-app
+only when a **sign-in page** sends you there: accounts.google.com, Google's Workspace SSO pages
+(`www.google.com/a/…`), another IdP's page, or the app's own login page — a host such as
+`login.`/`auth.`/`sso.`/`id.`, or a first path segment such as `/login`, `/signin`, `/sso`,
+`/auth`, `/oauth`, `/session`. A link to one clicked inside an email or a message opens in your
+real browser. If your app hands off to its IdP from anywhere else (straight from its main page,
+say), add your tenant's host — `acme.okta.com`, not `okta.com` — the same way as a vanity
+domain below; hosts you add are kept in-app wherever the link comes from.
+
 If your company hosts SSO on a **vanity domain** (e.g. `login.example.com`) that isn't one of
 those, add it — no rebuild needed — by either:
 - setting `ELECTRON_APPS_AUTH_DOMAINS` (comma/space-separated suffixes) in the app's
@@ -812,7 +821,7 @@ are correctly treated as external.
 | **Linux (GNOME):** busy cursor for a while after launching an app | Fixed — launchers now set `StartupNotify=false`. GNOME caches launcher files, so after rebuilding, log out and back in once. |
 | **Linux:** `gmail: command not found` | `~/.local/bin` isn't on your `PATH` (the build warns about this), or launch from the app menu instead. |
 | Need to re-login everywhere | Sessions are per-app and per-account-slot by design (full isolation). |
-| Corporate (SSO) sign-in opens in Chrome / can't complete | The IdP isn't recognized. If it's on a company vanity domain, add it via `ELECTRON_APPS_AUTH_DOMAINS` or `auth-domains.json` (see **Enterprise SSO** above), then retry. |
+| Corporate (SSO) sign-in opens in Chrome / can't complete | The IdP isn't recognized, or the hand-off didn't come from a sign-in page. Add your vanity domain or your tenant's host (`acme.okta.com`) via `ELECTRON_APPS_AUTH_DOMAINS` or `auth-domains.json` (see **Enterprise SSO** above), then retry. |
 | Clicking a link in a **second** account's window does nothing | Fixed — link routing now runs in every window, not just the first. Relaunch the rebuilt app (⌘Q first). |
 
 ---

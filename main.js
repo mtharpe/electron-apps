@@ -14,7 +14,8 @@ const path = require('path');
 const fs = require('fs');
 
 const sessionSync = require('./session-sync');
-const { APP_NAME, APP_URL, APP_ICON, IS_MAC, ACCOUNTS_DIR } = require('./lib/config');
+const windowPlace = require('./lib/window-place');
+const { APP_NAME, APP_URL, APP_HOST, APP_ICON, IS_MAC, ACCOUNTS_DIR } = require('./lib/config');
 const { logRecovery } = require('./lib/util');
 const { windows, focusWindow, getAccountsWindow, setAccountsWindow } = require('./lib/window-registry');
 const { CHROME_UA, STEALTH_WEBPREFS, spoofSession, whenWidevineReady } = require('./lib/chromium');
@@ -29,7 +30,7 @@ const {
   refreshAccountPresentation,
 } = require('./lib/accounts');
 const accountsModule = require('./lib/accounts');
-const { attachExternalLinkRouting, isFirstPartyHost, isFirstPartyUrl, inAppUrl } = require('./lib/routing');
+const { attachExternalLinkRouting, isFirstPartyHost, isFirstPartyUrl, isAuthHost, inAppUrl } = require('./lib/routing');
 const handlers = require('./lib/handlers');
 const handoff = require('./lib/handoff');
 const { showNotificationFor } = require('./lib/notifications');
@@ -68,9 +69,9 @@ function openAccountWindow(n) {
 
   // Where this slot's window sat last time, if it has ever been opened. Absent on a first
   // run, which keeps the old behaviour of opening maximized.
+  // Saved zoom (window-restore.js). Position, size and maximized state come from
+  // lib/window-place.js, which knows about monitors and only positions on X11.
   const geometry = getWindowGeometry(n);
-  const bounds = geometry && geometry.bounds;
-  const startMaximized = geometry ? geometry.maximized !== false : true;
 
   const partition = 'persist:account-' + n; // isolated, persistent cookie jar per account
   const sess = session.fromPartition(partition);
@@ -82,17 +83,21 @@ function openAccountWindow(n) {
   // account can adopt it. Idempotent, so calling it every open is fine.
   sessionSync.attachSlot(n);
 
-  const winOptions = {
-    width: bounds ? bounds.width : 1280,
-    height: bounds ? bounds.height : 860,
+  // Reopen on the monitor and spot the user left it (see lib/window-place.js); maximized by
+  // default, as before, when there is no saved place or its monitor is not connected.
+  const place = windowPlace.savedPlace(n);
+  const wantMaximized = place.__maximized !== false;
+  delete place.__maximized;
+  const win = new BrowserWindow(Object.assign({
+    width: 1280,
+    height: 860,
     // Held back until the renderer has a first frame — see reveal() below.
     show: false,
     title: accountLabel(n) || APP_NAME + ' — Account ' + n,
     backgroundColor: windowBackground(),
     webPreferences: Object.assign({ partition }, STEALTH_WEBPREFS),
-  };
-  if (bounds) { winOptions.x = bounds.x; winOptions.y = bounds.y; }
-  const win = new BrowserWindow(Object.assign(winOptions, APP_ICON ? { icon: APP_ICON } : {}));
+  }, place, APP_ICON ? { icon: APP_ICON } : {}));
+  windowPlace.track(n, win);
 
   win.webContents.setUserAgent(CHROME_UA);
 
@@ -109,13 +114,8 @@ function openAccountWindow(n) {
     if (revealTimer) { clearTimeout(revealTimer); revealTimer = null; }
     if (win.isDestroyed() || win.isVisible()) return;
     // Maximizing a hidden window is unreliable across Linux WMs, so re-assert it here where
-    // the window is about to be mapped. A window that was NOT maximized gets its saved
-    // bounds back at the same point, so the un-maximized size is what first paints.
-    if (startMaximized) {
-      if (!win.isMaximized()) win.maximize();
-    } else if (bounds) {
-      win.setBounds(bounds);
-    }
+    // the window is about to be mapped.
+    if (wantMaximized && !win.isMaximized()) win.maximize();
     win.show();
     // Zoom is per webContents and there is no page to zoom until the window exists, so apply
     // the saved factor after the reveal rather than at construction.
@@ -124,7 +124,7 @@ function openAccountWindow(n) {
   revealTimer = setTimeout(reveal, REVEAL_DEADLINE_MS);
   win.once('ready-to-show', reveal);
 
-  if (startMaximized) win.maximize();
+  if (wantMaximized) win.maximize();
   windows.set(n, win);
   noteWindowOpened(n);
   // Publish this slot's session once its page is up. The cookie-'changed' listener in
@@ -380,6 +380,16 @@ if (!gotSingleInstanceLock) {
     storeDir: path.join(ACCOUNTS_DIR, 'sessions'),
     emailForSlot: (n) => accountConfig(n).email,
     windowsForSlot: (n) => { const w = windows.get(n); return w ? [w] : []; },
+    isIdpHost: isAuthHost,
+    // A window on this app's own page is signed in -- if this app is a Google one. Its pages
+    // are what a dead Google session never reaches, so they are the proof a session works.
+    isAppPage: (url) => {
+      try {
+        const h = new URL(url).hostname.toLowerCase();
+        return /(^|\.)google\.com$/.test(APP_HOST) && (h === APP_HOST || h.endsWith('.' + APP_HOST));
+      } catch (e) { return false; }
+    },
+    loadHome: (wc) => wc.loadURL(APP_URL, { userAgent: CHROME_UA }).catch(() => {}),
     log: logRecovery,
   });
   loadThemePreference();
@@ -391,6 +401,14 @@ if (!gotSingleInstanceLock) {
   app.userAgentFallback = CHROME_UA;
   // Drop the Electron build flag that can taint requests.
   app.commandLine.appendSwitch('disable-blink-features', 'AutomationControlled');
+  // X11 (XWayland) only on request (ELECTRON_APPS_X11=1). Under Wayland an app cannot position
+  // its own window, so lib/window-place.js only takes effect on X11 -- but forcing X11 by
+  // default was measured broken on 11-02 (Intel Arc, castlabs Electron 42): the GPU process
+  // segfaulted at startup (exit_code=11) and no window ever drew (XGetWindowAttributes
+  // failed), so every app failed to open.
+  if (process.platform === 'linux' && process.env.ELECTRON_APPS_X11 === '1') {
+    app.commandLine.appendSwitch('ozone-platform', 'x11');
+  }
   // Keep EVERY window live — not just the focused one — so background account windows
   // keep refreshing (Calendar data) and keep firing reminders/notifications. Without these,
   // Chromium throttles/suspends background renderers and only the foreground profile updates.
